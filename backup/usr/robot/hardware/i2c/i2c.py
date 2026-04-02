@@ -199,9 +199,9 @@ while True:
     pwm_values = shm_read(shm_pwm, fd_pwm, PWM_FORMAT)
 
     if first_run or pwm_values != prev_pwm:
-        for ch, val in enumerate(pwm_values):
-            pwm.set_pwm(ch, val)
-
+        #for ch, val in enumerate(pwm_values):
+        #    pwm.set_pwm(ch, val)
+        pwm.set_all_pwm(pwm_values)
         prev_pwm = pwm_values
 
 

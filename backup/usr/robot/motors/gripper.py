@@ -8,7 +8,7 @@ from motor import set_rad, rem_rad
 import time
 
 ROTATIES = 3
-ENC_PPR = 1238
+ENC_PPR = 1238 #1441
 
 num_encoders = 5
 
@@ -29,7 +29,7 @@ def main():
     start_enc = read_encoder()
     end_enc = start_enc + (ROTATIES * ENC_PPR)
 
-    set_rad(85)
+    set_rad(75)
 
     while True:
         slow = False
@@ -37,16 +37,25 @@ def main():
 
         if ((end_enc - act_enc) < ((ENC_PPR / 3) * 2)) and (slow == False):
             slow = True
-            set_rad(25)
+            set_rad(30)
 
-        if ((end_enc - act_enc) < 0):
+        if ((end_enc - act_enc) < 10):
+            #set_rad(10)
             #rem_rad()
             break
 
         time.sleep(0.01)
 
+
+
     rem_rad()
-    time.sleep(0.2)
+    time.sleep(1)
     set_rad(0)
 
-main()
+    act_enc = read_encoder()
+    print(f"encode waarde {end_enc - act_enc}")
+
+
+while True:
+    main()
+    time.sleep(1)

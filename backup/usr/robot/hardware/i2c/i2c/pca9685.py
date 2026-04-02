@@ -70,9 +70,38 @@ class PCA9685:
         self.i2c.write_block_data(
             self.address,
             reg,
-            [0x00, 0x00, duty & 0xFF, duty >> 8]
+            [
+                0x00, 0x00, duty & 0xFF, duty >> 8
+            ]
         )
 
+    def set_all_pwm(self, data):
+        reg = self.LED0_ON_L
+
+        self.i2c.write_block_data(
+            self.address,
+            reg,
+            [
+                0x00, 0x00, data[0] & 0xFF, data[0] >> 8,
+                0x00, 0x00, data[1] & 0xFF, data[1] >> 8,
+                0x00, 0x00, data[2] & 0xFF, data[2] >> 8,
+                0x00, 0x00, data[3] & 0xFF, data[3] >> 8,
+                0x00, 0x00, data[4] & 0xFF, data[4] >> 8,
+                0x00, 0x00, data[5] & 0xFF, data[5] >> 8,
+                0x00, 0x00, data[6] & 0xFF, data[6] >> 8,
+                0x00, 0x00, data[7] & 0xFF, data[7] >> 8,
+                0x00, 0x00, data[8] & 0xFF, data[8] >> 8,
+                0x00, 0x00, data[9] & 0xFF, data[9] >> 8,
+                0x00, 0x00, data[10] & 0xFF, data[10] >> 8,
+                0x00, 0x00, data[11] & 0xFF, data[11] >> 8
+            ]
+        )
+
+
+
+
+
+        
     # ------------------------
     # PWM percentage (0-100%)
     # ------------------------
