@@ -1,4 +1,3 @@
-
 # fullBrain.py
 #
 # Mini-states (robot_mode):
@@ -14,6 +13,7 @@
 #   /dev/shm/robot_cmd      <- mecanum rijcommando's  (4x double)
 #   /dev/shm/gripper_cmd    <- gripper mode+speed     (<id>)
 #   /dev/shm/vision_frame   <- camera frame           (timestamp + RGB)
+#   /dev/shm/led_ctrl       <- LED kleuren            (<7B>)
 
 import os
 import time
@@ -36,6 +36,17 @@ MODE_AUTO   = "auto"
 robot_mode  = MODE_MANUAL          # beginstand = MANUAL
 
 # ============================================================
+# SHARED MEMORY — HELPERS
+# ============================================================
+def _create_or_open_shm(path, size):
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(b"\x00" * size)
+    fh = open(path, "r+b")
+    shm = mmap.mmap(fh.fileno(), size)
+    return shm, fh
+
+# ============================================================
 # SHARED MEMORY — RIJCOMMANDO'S
 # ============================================================
 CMD_SHM_PATH = "/dev/shm/robot_cmd"
@@ -52,21 +63,13 @@ def write_drive_cmd(vx, vy, omega):
 # ============================================================
 # SHARED MEMORY — GRIPPER
 # ============================================================
-GRIPPER_IDLE = 0
-GRIPPER_AUTO = 1
-GRIPPER_JOG  = 2
+GRIPPER_IDLE     = 0
+GRIPPER_AUTO_CMD = 1
+GRIPPER_JOG      = 2
 
 GRIPPER_SHM_PATH = "/dev/shm/gripper_cmd"
 GRIPPER_FMT      = "<id"
 GRIPPER_SIZE     = struct.calcsize(GRIPPER_FMT)
-
-def _create_or_open_shm(path, size):
-    if not os.path.exists(path):
-        with open(path, "wb") as f:
-            f.write(b"\x00" * size)
-    fh = open(path, "r+b")
-    shm = mmap.mmap(fh.fileno(), size)
-    return shm, fh
 
 gripper_shm, gripper_fh = _create_or_open_shm(GRIPPER_SHM_PATH, GRIPPER_SIZE)
 
@@ -77,12 +80,63 @@ def write_gripper_cmd(mode, speed=0.0):
     fcntl.flock(gripper_fh.fileno(), fcntl.LOCK_UN)
 
 # ============================================================
+# SHARED MEMORY — LED
+# LED_FORMAT = "<7B"  →  mode, r1, g1, b1, r2, g2, b2
+# mode 1 = solid beide LEDs
+# mode 2 = idle/speciaal
+# mode 3 = gecombineerd
+# ============================================================
+LED_SHM_PATH = "/dev/shm/led_ctrl"
+LED_FMT      = "<7B"
+LED_SIZE     = struct.calcsize(LED_FMT)
+
+led_shm, led_fh = _create_or_open_shm(LED_SHM_PATH, LED_SIZE)
+
+def write_led(mode, r1, g1, b1, r2, g2, b2):
+    fcntl.flock(led_fh.fileno(), fcntl.LOCK_EX)
+    led_shm.seek(0)
+    led_shm.write(struct.pack(LED_FMT, mode, r1, g1, b1, r2, g2, b2))
+    fcntl.flock(led_fh.fileno(), fcntl.LOCK_UN)
+
+# LED-kleuren constanten
+# MANUAL — zelfde als mecanum gebruikte
+def led_manual_update(vx, vy, omega):
+    avx = abs(vx)
+    avy = abs(vy)
+    if avx > 0.2 and avy > 0.2:
+        write_led(3, 255, 255,   0,   0, 255,   0)   # vooruit + zijwaarts: geel + groen
+    elif avx > 0.2:
+        write_led(1,   0, 255,   0,   0,   0,   0)   # vooruit/achteruit: groen
+    elif avy > 0.2:
+        write_led(1, 255, 255,   0,   0, 255,   0)   # zijwaarts: geel + groen
+    elif abs(omega) > 0.5:
+        write_led(1,   0, 150, 255,   0, 150, 255)   # roteren: blauw
+    else:
+        write_led(2,   0, 255, 255,   0,   0,   0)   # idle: cyaan
+
+# AUTO — paars: zoekend knippert, gevonden solide
+_led_blink_state = False
+
+def led_auto_update(has_target: bool):
+    global _led_blink_state
+    if has_target:
+        # solide paars
+        write_led(1, 160, 0, 200, 160, 0, 200)
+    else:
+        # knipperend paars — toggle elke aanroep (vision_loop ~20ms, update elke ~500ms via teller)
+        if _led_blink_state:
+            write_led(1, 160, 0, 200, 160, 0, 200)
+        else:
+            write_led(1,   0, 0,   0,   0, 0,   0)   # uit
+        _led_blink_state = not _led_blink_state
+
+# ============================================================
 # SHARED MEMORY — VISION FRAME
 # ============================================================
 WIDTH, HEIGHT, CHANNELS = 320, 240, 3
-FRAME_SIZE          = WIDTH * HEIGHT * CHANNELS
-VISION_FRAME_TOTAL  = 8 + FRAME_SIZE
-VISION_FRAME_PATH   = "/dev/shm/vision_frame"
+FRAME_SIZE         = WIDTH * HEIGHT * CHANNELS
+VISION_FRAME_TOTAL = 8 + FRAME_SIZE
+VISION_FRAME_PATH  = "/dev/shm/vision_frame"
 
 vision_shm, vision_fh = _create_or_open_shm(VISION_FRAME_PATH, VISION_FRAME_TOTAL)
 
@@ -141,10 +195,7 @@ def _compute_velocity(bekers, frame_w):
             d2 = (cx - _last_target[0])**2 + (cy - _last_target[1])**2
             if d2 < MAX_TRACK_DIST**2:
                 hits.append((d2, b))
-        if hits:
-            _, best = min(hits, key=lambda t: t[0])
-        else:
-            best = max(bekers, key=lambda b: b[4])
+        best = min(hits, key=lambda t: t[0])[1] if hits else max(bekers, key=lambda b: b[4])
     else:
         best = max(bekers, key=lambda b: b[4])
 
@@ -163,10 +214,13 @@ def _compute_velocity(bekers, frame_w):
     return vx, 0.0, omega
 
 # ============================================================
-# VISION LOOP  (altijd actief, schrijft rijcommando alleen in AUTO)
+# VISION LOOP  (altijd actief, schrijft rij+LED-commando afhankelijk van modus)
 # ============================================================
+_blink_counter = 0
+BLINK_TICKS    = 25   # ~500 ms bij 20 ms sleep
+
 async def vision_loop():
-    global latest_jpeg
+    global latest_jpeg, _blink_counter
 
     while True:
         # frame lezen
@@ -178,7 +232,7 @@ async def vision_loop():
         finally:
             fcntl.flock(vision_fh.fileno(), fcntl.LOCK_UN)
 
-        frame = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, CHANNELS))
+        frame     = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, CHANNELS))
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         # bekerdetectie
@@ -201,22 +255,26 @@ async def vision_loop():
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 120)
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         cnt_obs, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        obstakels = {"LINKS": 0, "MIDDEN": 0, "RECHTS": 0}
         for c in cnt_obs:
             if cv2.contourArea(c) < MIN_OBST_AREA:
                 continue
             ox, oy, ow, oh = cv2.boundingRect(c)
             if ow < 12 or oh < 6:
                 continue
-            zone = _classify_zone(ox + ow // 2, WIDTH)
-            obstakels[zone] += 1
             cv2.rectangle(roi, (ox, oy), (ox+ow, oy+oh), (0, 0, 255), 2)
         frame_bgr[int(HEIGHT * 0.55):HEIGHT, :] = roi
 
-        # rijcommando alleen in AUTO modus
+        # rijcommando + LED afhankelijk van modus
         if robot_mode == MODE_AUTO:
             vx, vy, omega = _compute_velocity(bekers, WIDTH)
             write_drive_cmd(vx, vy, omega)
+
+            # LED: elke BLINK_TICKS ticks de blink-toestand wisselen
+            _blink_counter += 1
+            if _blink_counter >= BLINK_TICKS:
+                _blink_counter = 0
+                led_auto_update(has_target=bool(bekers))
+
             label = f"AUTO  vx:{vx:.2f} vy:{vy:.2f} w:{omega:.2f} bekers:{len(bekers)}"
         else:
             label = f"MANUAL  bekers:{len(bekers)}"
@@ -256,11 +314,9 @@ async def _ws_read_frame(reader):
         return None
     payload_len = header[1] & 127
     if payload_len == 126:
-        ext = await reader.read(2)
-        payload_len = int.from_bytes(ext, "big")
+        payload_len = int.from_bytes(await reader.read(2), "big")
     elif payload_len == 127:
-        ext = await reader.read(8)
-        payload_len = int.from_bytes(ext, "big")
+        payload_len = int.from_bytes(await reader.read(8), "big")
     mask    = await reader.read(4)
     payload = await reader.read(payload_len)
     return bytes(b ^ mask[i % 4] for i, b in enumerate(payload)).decode(errors="ignore")
@@ -280,7 +336,7 @@ async def _ws_send_binary(writer, data: bytes):
     await writer.drain()
 
 async def _ws_send_text(writer, text: str):
-    data = text.encode()
+    data   = text.encode()
     header = bytearray([0x81])
     length = len(data)
     if length < 126:
@@ -298,7 +354,7 @@ async def _ws_send_text(writer, text: str):
 # CONTROLE WEBSOCKET
 # ============================================================
 async def handle_control_ws(reader, writer, request):
-    global robot_mode, drive_state
+    global robot_mode, drive_state, _blink_counter
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -314,15 +370,18 @@ async def handle_control_ws(reader, writer, request):
 
             # ---- MODUS WISSELEN ----
             if msg == "set_mode:manual":
-                robot_mode = MODE_MANUAL
+                robot_mode  = MODE_MANUAL
                 drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
+                _blink_counter = 0
                 write_drive_cmd(0.0, 0.0, 0.0)
+                led_manual_update(0.0, 0.0, 0.0)
                 print("[brain] → MANUAL")
                 await _ws_send_text(writer, "mode:manual")
 
             elif msg == "set_mode:auto":
-                robot_mode = MODE_AUTO
+                robot_mode  = MODE_AUTO
                 drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
+                _blink_counter = 0
                 print("[brain] → AUTO")
                 await _ws_send_text(writer, "mode:auto")
 
@@ -355,7 +414,7 @@ async def handle_control_ws(reader, writer, request):
                     write_gripper_cmd(GRIPPER_IDLE)
 
                 elif msg == "gripper_auto":
-                    write_gripper_cmd(GRIPPER_AUTO)
+                    write_gripper_cmd(GRIPPER_AUTO_CMD)
                     print("[brain] gripper AUTO gestart")
 
                 write_drive_cmd(drive_state["vx"], drive_state["vy"], drive_state["omega"])
@@ -366,6 +425,7 @@ async def handle_control_ws(reader, writer, request):
     # verbinding verloren → stop robot veilig
     write_drive_cmd(0.0, 0.0, 0.0)
     write_gripper_cmd(GRIPPER_IDLE)
+    led_manual_update(0.0, 0.0, 0.0)
     writer.close()
 
 # ============================================================
@@ -388,8 +448,25 @@ async def handle_camera_ws(reader, writer, request):
     writer.close()
 
 # ============================================================
-# HTTP HANDLER
+# HTTP HANDLER  —  laadt HTML uit web/index.html
 # ============================================================
+_WEB_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+_HTML_CACHE: bytes | None = None
+
+def _load_html() -> bytes:
+    global _HTML_CACHE
+    if _HTML_CACHE is None:
+        path = os.path.join(_WEB_DIR, "index.html")
+        with open(path, "rb") as f:
+            body = f.read()
+        _HTML_CACHE = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/html; charset=utf-8\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"\r\n" + body
+        )
+    return _HTML_CACHE
+
 async def handle_client(reader, writer):
     data    = await reader.read(2048)
     request = data.decode(errors="ignore")
@@ -401,222 +478,19 @@ async def handle_client(reader, writer):
             await handle_control_ws(reader, writer, request)
         return
 
-    writer.write(HTML_PAGE)
+    writer.write(_load_html())
     await writer.drain()
     writer.close()
 
 # ============================================================
-# HEARTBEAT  (refresht timestamp in MANUAL zodat mecanum niet time-out)
+# HEARTBEAT  (refresht timestamp in MANUAL + update LED)
 # ============================================================
 async def heartbeat():
     while True:
         if robot_mode == MODE_MANUAL:
             write_drive_cmd(drive_state["vx"], drive_state["vy"], drive_state["omega"])
+            led_manual_update(drive_state["vx"], drive_state["vy"], drive_state["omega"])
         await asyncio.sleep(0.05)
-
-# ============================================================
-# HTML PAGINA
-# ============================================================
-HTML_PAGE = b"""\
-HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-
-<!DOCTYPE html>
-<html lang="nl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Robot Control</title>
-<style>
-  body { font-family: sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 12px; }
-  h2   { margin: 0 0 10px; }
-
-  #modebadge {
-    display: inline-block; padding: 4px 14px; border-radius: 20px;
-    font-weight: bold; font-size: 1.1em; margin-right: 10px;
-  }
-  .badge-manual { background: #0f3460; color: #e94560; }
-  .badge-auto   { background: #0f5c2e; color: #4ade80; }
-
-  button {
-    padding: 8px 16px; margin: 4px; border: none; border-radius: 6px;
-    cursor: pointer; font-size: 0.95em;
-  }
-  .btn-switch  { background: #e94560; color: #fff; }
-  .btn-switch.auto { background: #4ade80; color: #111; }
-  .btn-drive   { background: #0f3460; color: #eee; font-size: 1.3em; width: 60px; height: 54px; }
-  .btn-gripper { background: #2d2d54; color: #eee; }
-  .btn-auto-trigger { background: #f59e0b; color: #111; font-weight: bold; }
-
-  #controls { margin: 10px 0; }
-  #drive-grid { display: grid; grid-template-columns: repeat(3, 60px); gap: 4px; margin: 8px 0; }
-  .drive-center { grid-column: 2; }
-
-  #gripper-panel { margin: 10px 0; }
-  #status { font-size: 0.85em; color: #aaa; margin: 6px 0; }
-  #cam    { display: block; margin-top: 10px; border: 2px solid #444; border-radius: 6px; }
-
-  .hidden { display: none !important; }
-  #auto-info { color: #4ade80; font-style: italic; margin: 6px 0; }
-</style>
-</head>
-<body>
-
-<h2>
-  <span id="modebadge" class="badge-manual">MANUAL</span>
-  Robot Control
-</h2>
-
-<div id="status">Verbinden...</div>
-
-<!-- Modus wisselen -->
-<div>
-  <button id="btn-switch" class="btn-switch" onclick="switchMode()">Start AUTO</button>
-</div>
-
-<!-- AUTO info -->
-<div id="auto-info" class="hidden">Robot rijdt autonoom op vision.</div>
-
-<!-- MANUAL rijbediening -->
-<div id="controls">
-  <div><strong>Rijden</strong> <small>(pijltjes of knoppen)</small></div>
-  <div id="drive-grid">
-    <div></div>
-    <button class="btn-drive" onmousedown="press('up')"    onmouseup="release()" ontouchstart="press('up')"    ontouchend="release()">&#8593;</button>
-    <div></div>
-    <button class="btn-drive" onmousedown="press('left')"  onmouseup="release()" ontouchstart="press('left')"  ontouchend="release()">&#8592;</button>
-    <button class="btn-drive" onmousedown="press('stop')"  onmouseup="release()" ontouchstart="press('stop')"  ontouchend="release()">&#9632;</button>
-    <button class="btn-drive" onmousedown="press('right')" onmouseup="release()" ontouchstart="press('right')" ontouchend="release()">&#8594;</button>
-    <button class="btn-drive" onmousedown="press('rot_left')"  onmouseup="release()" ontouchstart="press('rot_left')"  ontouchend="release()">&#8634;</button>
-    <button class="btn-drive" onmousedown="press('down')"  onmouseup="release()" ontouchstart="press('down')"  ontouchend="release()">&#8595;</button>
-    <button class="btn-drive" onmousedown="press('rot_right')" onmouseup="release()" ontouchstart="press('rot_right')" ontouchend="release()">&#8635;</button>
-  </div>
-</div>
-
-<!-- MANUAL gripper bediening -->
-<div id="gripper-panel">
-  <div><strong>Gripper</strong></div>
-  <button class="btn-gripper"
-    onmousedown="send('gripper_jog:60')"  onmouseup="send('gripper_stop')"
-    ontouchstart="send('gripper_jog:60')" ontouchend="send('gripper_stop')">
-    &#9650; Open (jog)
-  </button>
-  <button class="btn-gripper"
-    onmousedown="send('gripper_jog:-60')" onmouseup="send('gripper_stop')"
-    ontouchstart="send('gripper_jog:-60')" ontouchend="send('gripper_stop')">
-    &#9660; Dicht (jog)
-  </button>
-  <button class="btn-auto-trigger" onclick="send('gripper_auto')">
-    &#9654; Gripper AUTO
-  </button>
-</div>
-
-<!-- Camera -->
-<img id="cam" width="320" alt="camera">
-
-<script>
-let ws     = new WebSocket("ws://" + location.host + "/ws");
-let camWs  = new WebSocket("ws://" + location.host + "/cam");
-let mode   = "manual";
-let keys   = new Set();
-let pressTimer = null;
-
-camWs.binaryType = "blob";
-camWs.onmessage  = (e) => {
-  let url = URL.createObjectURL(e.data);
-  document.getElementById("cam").src = url;
-};
-
-ws.onopen    = () => setStatus("Verbonden");
-ws.onclose   = () => setStatus("Verbinding verbroken");
-ws.onerror   = () => setStatus("Verbindingsfout");
-ws.onmessage = (e) => {
-  if (e.data.startsWith("mode:")) {
-    applyMode(e.data.split(":")[1]);
-  }
-};
-
-function send(cmd) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
-}
-
-function setStatus(msg) {
-  document.getElementById("status").textContent = msg;
-}
-
-// Houd rijknop ingedrukt -> blijf commando sturen
-function press(cmd) {
-  if (mode !== "manual") return;
-  send(cmd);
-  pressTimer = setInterval(() => send(cmd), 80);
-}
-function release() {
-  clearInterval(pressTimer);
-  send("stop");
-}
-
-function switchMode() {
-  if (mode === "manual") {
-    send("set_mode:auto");
-  } else {
-    send("set_mode:manual");
-  }
-}
-
-function applyMode(newMode) {
-  mode = newMode;
-  let badge   = document.getElementById("modebadge");
-  let btn     = document.getElementById("btn-switch");
-  let ctrl    = document.getElementById("controls");
-  let gripper = document.getElementById("gripper-panel");
-  let autoInfo= document.getElementById("auto-info");
-
-  if (mode === "auto") {
-    badge.textContent = "AUTO";
-    badge.className   = "badge-auto";
-    btn.textContent   = "Stop AUTO";
-    btn.className     = "btn-switch auto";
-    ctrl.classList.add("hidden");
-    gripper.classList.add("hidden");
-    autoInfo.classList.remove("hidden");
-  } else {
-    badge.textContent = "MANUAL";
-    badge.className   = "badge-manual";
-    btn.textContent   = "Start AUTO";
-    btn.className     = "btn-switch";
-    ctrl.classList.remove("hidden");
-    gripper.classList.remove("hidden");
-    autoInfo.classList.add("hidden");
-  }
-}
-
-// Toetsenbord rijbesturing (MANUAL)
-document.addEventListener("keydown", (e) => {
-  if (mode !== "manual" || e.repeat) return;
-  const map = {
-    ArrowUp: "up", ArrowDown: "down",
-    ArrowLeft: "left", ArrowRight: "right",
-    "[": "rot_left", "]": "rot_right"
-  };
-  if (map[e.key]) { keys.add(e.key); flushKeys(); }
-});
-document.addEventListener("keyup", (e) => {
-  keys.delete(e.key);
-  flushKeys();
-});
-function flushKeys() {
-  send("stop");
-  if (keys.has("ArrowUp"))    send("up");
-  if (keys.has("ArrowDown"))  send("down");
-  if (keys.has("ArrowLeft"))  send("left");
-  if (keys.has("ArrowRight")) send("right");
-  if (keys.has("["))          send("rot_left");
-  if (keys.has("]"))          send("rot_right");
-}
-</script>
-</body>
-</html>
-"""
 
 # ============================================================
 # MAIN
@@ -625,6 +499,9 @@ async def main():
     server = await asyncio.start_server(handle_client, "0.0.0.0", 8765)
     print("[brain] Server actief op http://ROBOT_IP:8765")
     print("[brain] Start in MANUAL modus")
+
+    # beginstand LED
+    led_manual_update(0.0, 0.0, 0.0)
 
     async with server:
         await asyncio.gather(

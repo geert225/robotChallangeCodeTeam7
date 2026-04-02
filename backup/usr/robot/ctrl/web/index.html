@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Control</title>
+<style>
+  body { font-family: sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 12px; }
+  h2   { margin: 0 0 10px; }
+
+  #modebadge {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    font-weight: bold; font-size: 1.1em; margin-right: 10px;
+  }
+  .badge-manual { background: #0f3460; color: #e94560; }
+  .badge-auto   { background: #0f5c2e; color: #4ade80; }
+
+  button {
+    padding: 8px 16px; margin: 4px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 0.95em;
+  }
+  .btn-switch         { background: #e94560; color: #fff; }
+  .btn-switch.auto    { background: #4ade80; color: #111; }
+  .btn-drive          { background: #0f3460; color: #eee; font-size: 1.3em; width: 60px; height: 54px; }
+  .btn-gripper        { background: #2d2d54; color: #eee; }
+  .btn-auto-trigger   { background: #f59e0b; color: #111; font-weight: bold; }
+
+  #controls    { margin: 10px 0; }
+  #drive-grid  {
+    display: grid;
+    grid-template-columns: repeat(3, 60px);
+    gap: 4px;
+    margin: 8px 0;
+  }
+
+  #gripper-panel { margin: 10px 0; }
+  #status        { font-size: 0.85em; color: #aaa; margin: 6px 0; }
+  #cam           { display: block; margin-top: 10px; border: 2px solid #444; border-radius: 6px; }
+
+  .hidden   { display: none !important; }
+  #auto-info { color: #4ade80; font-style: italic; margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<h2>
+  <span id="modebadge" class="badge-manual">MANUAL</span>
+  Robot Control
+</h2>
+
+<div id="status">Verbinden...</div>
+
+<!-- Modus wisselen -->
+<div>
+  <button id="btn-switch" class="btn-switch" onclick="switchMode()">Start AUTO</button>
+</div>
+
+<!-- AUTO info -->
+<div id="auto-info" class="hidden">Robot rijdt autonoom op vision.</div>
+
+<!-- MANUAL rijbediening -->
+<div id="controls">
+  <div><strong>Rijden</strong> <small>(pijltjes of knoppen)</small></div>
+  <div id="drive-grid">
+    <div></div>
+    <button class="btn-drive"
+      onmousedown="press('up')"       onmouseup="release()"
+      ontouchstart="press('up')"      ontouchend="release()">&#8593;</button>
+    <div></div>
+
+    <button class="btn-drive"
+      onmousedown="press('left')"     onmouseup="release()"
+      ontouchstart="press('left')"    ontouchend="release()">&#8592;</button>
+    <button class="btn-drive"
+      onmousedown="press('stop')"     onmouseup="release()"
+      ontouchstart="press('stop')"    ontouchend="release()">&#9632;</button>
+    <button class="btn-drive"
+      onmousedown="press('right')"    onmouseup="release()"
+      ontouchstart="press('right')"   ontouchend="release()">&#8594;</button>
+
+    <button class="btn-drive"
+      onmousedown="press('rot_left')" onmouseup="release()"
+      ontouchstart="press('rot_left')" ontouchend="release()">&#8634;</button>
+    <button class="btn-drive"
+      onmousedown="press('down')"     onmouseup="release()"
+      ontouchstart="press('down')"    ontouchend="release()">&#8595;</button>
+    <button class="btn-drive"
+      onmousedown="press('rot_right')" onmouseup="release()"
+      ontouchstart="press('rot_right')" ontouchend="release()">&#8635;</button>
+  </div>
+</div>
+
+<!-- MANUAL gripper bediening -->
+<div id="gripper-panel">
+  <div><strong>Gripper</strong></div>
+  <button class="btn-gripper"
+    onmousedown="send('gripper_jog:30')"  onmouseup="send('gripper_stop')"
+    ontouchstart="send('gripper_jog:30')" ontouchend="send('gripper_stop')">
+    &#9650; Gripper JOG
+  </button>
+  <button class="btn-auto-trigger" onclick="send('gripper_auto')">
+    &#9654; Gripper AUTO
+  </button>
+</div>
+
+<!-- Camera -->
+<img id="cam" width="320" alt="camera">
+
+<script>
+let ws        = new WebSocket("ws://" + location.host + "/ws");
+let camWs     = new WebSocket("ws://" + location.host + "/cam");
+let mode      = "manual";
+let pressTimer = null;
+
+camWs.binaryType = "blob";
+camWs.onmessage  = (e) => {
+  let url = URL.createObjectURL(e.data);
+  document.getElementById("cam").src = url;
+};
+
+ws.onopen    = () => setStatus("Verbonden");
+ws.onclose   = () => setStatus("Verbinding verbroken");
+ws.onerror   = () => setStatus("Verbindingsfout");
+ws.onmessage = (e) => {
+  if (e.data.startsWith("mode:")) {
+    applyMode(e.data.split(":")[1]);
+  }
+};
+
+function send(cmd) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
+}
+
+function setStatus(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
+// Houd rijknop ingedrukt → blijf commando sturen
+function press(cmd) {
+  if (mode !== "manual") return;
+  send(cmd);
+  pressTimer = setInterval(() => send(cmd), 80);
+}
+function release() {
+  clearInterval(pressTimer);
+  send("stop");
+}
+
+function switchMode() {
+  send(mode === "manual" ? "set_mode:auto" : "set_mode:manual");
+}
+
+function applyMode(newMode) {
+  mode = newMode;
+  const badge    = document.getElementById("modebadge");
+  const btn      = document.getElementById("btn-switch");
+  const ctrl     = document.getElementById("controls");
+  const gripper  = document.getElementById("gripper-panel");
+  const autoInfo = document.getElementById("auto-info");
+
+  if (mode === "auto") {
+    badge.textContent = "AUTO";
+    badge.className   = "badge-auto";
+    btn.textContent   = "Stop AUTO";
+    btn.className     = "btn-switch auto";
+    ctrl.classList.add("hidden");
+    gripper.classList.add("hidden");
+    autoInfo.classList.remove("hidden");
+  } else {
+    badge.textContent = "MANUAL";
+    badge.className   = "badge-manual";
+    btn.textContent   = "Start AUTO";
+    btn.className     = "btn-switch";
+    ctrl.classList.remove("hidden");
+    gripper.classList.remove("hidden");
+    autoInfo.classList.add("hidden");
+  }
+}
+
+// Toetsenbord rijbesturing (MANUAL)
+let keys = new Set();
+document.addEventListener("keydown", (e) => {
+  if (mode !== "manual" || e.repeat) return;
+  const map = {
+    ArrowUp: "up", ArrowDown: "down",
+    ArrowLeft: "left", ArrowRight: "right",
+    "[": "rot_left", "]": "rot_right"
+  };
+  if (map[e.key]) { keys.add(e.key); flushKeys(); }
+});
+document.addEventListener("keyup", (e) => {
+  keys.delete(e.key);
+  flushKeys();
+});
+function flushKeys() {
+  send("stop");
+  if (keys.has("ArrowUp"))    send("up");
+  if (keys.has("ArrowDown"))  send("down");
+  if (keys.has("ArrowLeft"))  send("left");
+  if (keys.has("ArrowRight")) send("right");
+  if (keys.has("["))          send("rot_left");
+  if (keys.has("]"))          send("rot_right");
+}
+</script>
+</body>
+</html>

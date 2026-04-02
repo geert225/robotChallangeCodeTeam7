@@ -2,7 +2,6 @@ import os
 import mmap
 import struct
 import time
-import fcntl
 
 #from pwm import set_motor
 from motor import set_motor
@@ -56,29 +55,6 @@ fd_cmd = os.open(CMD_SHM_PATH, os.O_CREAT | os.O_RDWR)
 os.ftruncate(fd_cmd, CMD_SIZE)
 cmd_mem = mmap.mmap(fd_cmd, CMD_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
 os.close(fd_cmd)
-
-
-LED_FORMAT = "<7B"  # mode, r1,g1,b1, r2,g2,b2
-SHM_PATH = "/dev/shm/led_ctrl"
-
-# ================= SHM HELPERS =================
-def create_or_open_shm(path, fmt):
-    size = struct.calcsize(fmt)
-    if not os.path.exists(path):
-        with open(path, "wb") as f:
-            f.write(b"\x00" * size)
-    f = open(path, "r+b")
-    shm = mmap.mmap(f.fileno(), size)
-    return shm, f
-
-def shm_write(shm, fd, fmt, values):
-    fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
-    shm.seek(0)
-    shm.write(struct.pack(fmt, *values))
-    fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
-
-# ================= INIT SHM =================
-shm_led, fd_led = create_or_open_shm(SHM_PATH, LED_FORMAT)
 
 
 def read_command():
@@ -158,16 +134,6 @@ while True:
     vx_cmd = slew(vx_cmd, vx_target, MAX_ACCEL)
     vy_cmd = slew(vy_cmd, vy_target, MAX_ACCEL)
     omega_cmd = slew(omega_cmd, omega_target, MAX_OMEGA_ACCEL)
-
-    if abs(vx_cmd) > 0.2:
-        if abs(vy_cmd) > 0.2:
-            shm_write(shm_led, fd_led, LED_FORMAT, (3, 255, 255, 0, 0, 255, 0))
-        else:
-            shm_write(shm_led, fd_led, LED_FORMAT, (1, 0, 255, 0, 0, 0, 0))
-    elif abs(vy_cmd) > 0.2:
-        shm_write(shm_led, fd_led, LED_FORMAT, (1, 255, 255, 0, 0, 255, 0))
-    else:
-        shm_write(shm_led, fd_led, LED_FORMAT, (2, 0, 255, 255, 0, 0, 0))
 
     target_rpms = mecanum_kinematics(vx_cmd, vy_cmd, omega_cmd)
 
