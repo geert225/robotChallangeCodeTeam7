@@ -23,17 +23,18 @@ VISION_FRAME_PATH = "/dev/shm/vision_frame"
 CMD_SHM_PATH = "/dev/shm/robot_cmd"
 CMD_SIZE = 32
 
-# open SHM for frames (read-only)
 fd_frame = os.open(VISION_FRAME_PATH, os.O_RDONLY)
 vision_frame_mm = mmap.mmap(fd_frame, VISION_FRAME_TOTAL, mmap.MAP_SHARED, mmap.PROT_READ)
 
-# open SHM for commands
 fd_cmd = os.open(CMD_SHM_PATH, os.O_CREAT | os.O_RDWR)
 os.ftruncate(fd_cmd, CMD_SIZE)
 cmd_mem = mmap.mmap(fd_cmd, CMD_SIZE, mmap.MAP_SHARED, mmap.PROT_WRITE)
 
 latest_jpeg = None
 last_dir_pos = False
+
+# 👉 NIEUW: tracking state
+last_target = None  # (cx, cy)
 
 # ============================================================
 # DETECTIE PARAMETERS
@@ -45,15 +46,18 @@ MIN_BEKER_AREA = 50
 MAX_BEKER_AREA = 300000
 MIN_OBSTAKEL_AREA = 250
 
-BASE_SPEED = 4  # iets sneller
+BASE_SPEED = 4
 MIN_SPEED = 0.35
 K_OMEGA = 2.8
 MAX_OMEGA = 4.0
 STOP_AREA = 9000
-SEARCH_OMEGA = 4.0  # rondjes draaien als niets gevonden
-ERROR_DEADBAND = 0.02  # ±2% frame midden
+SEARCH_OMEGA = 4.0
+ERROR_DEADBAND = 0.02
 DRIVE_SPEED = 2.0
 DRIVE_MIN_OMEGA = 1.5
+
+# 👉 NIEUW: tracking threshold
+MAX_TRACK_DIST = 80  # pixels
 
 # ============================================================
 # HELPERS
@@ -71,52 +75,82 @@ def write_command(vx, vy, omega):
     cmd_mem[:CMD_SIZE] = struct.pack("dddd", vx, vy, omega, time.time())
 
 def compute_velocity(bekers, frame_width):
-    global last_dir_pos
+    global last_dir_pos, last_target
+
     if not bekers:
-        # niets gezien → rondjes draaien
-        if (last_dir_pos == True) :
+        # target kwijt → reset
+        last_target = None
+
+        if last_dir_pos:
             return 0.0, 0.0, -SEARCH_OMEGA
         else:
             return 0.0, 0.0, SEARCH_OMEGA
 
-    # kies grootste beker
-    x, y, w, h, area = max(bekers, key=lambda b: b[4])
-    cx = x + w // 2
+    # ========================================================
+    # TARGET SELECTIE MET TRACKING
+    # ========================================================
 
-    # bereken fout t.o.v. centrum
+    if last_target is not None:
+        candidates = []
+        for b in bekers:
+            x, y, w, h, area = b
+            cx = x + w // 2
+            cy = y + h // 2
+            dist = (cx - last_target[0])**2 + (cy - last_target[1])**2
+
+            if dist < MAX_TRACK_DIST**2:
+                candidates.append((dist, b))
+
+        if candidates:
+            _, (x, y, w, h, area) = min(candidates, key=lambda t: t[0])
+        else:
+            # target verloren → fallback naar grootste
+            x, y, w, h, area = max(bekers, key=lambda b: b[4])
+    else:
+        # eerste detectie
+        x, y, w, h, area = max(bekers, key=lambda b: b[4])
+
+    cx = x + w // 2
+    cy = y + h // 2
+
+    # update tracking
+    last_target = (cx, cy)
+
+    # ========================================================
+    # BESTURING
+    # ========================================================
+
     error = (cx - frame_width // 2) / (frame_width // 2)
 
-    if(error < 0.0):
+    if error < 0:
         last_dir_pos = False
-    else: 
+    else:
         last_dir_pos = True
 
-    # als beker in centrale zone, niet draaien
     if abs(error) < ERROR_DEADBAND:
         omega = 0.0
     else:
         omega = -K_OMEGA * error
         omega = max(-MAX_OMEGA, min(MAX_OMEGA, omega))
 
-    # snelheid afhankelijk van hoek
     speed_factor = max(0, 1 - 1.5 * abs(error))
-    
+
     vx = 0.0
-    if omega < DRIVE_MIN_OMEGA:
+    if abs(omega) < DRIVE_MIN_OMEGA:
         vx = DRIVE_SPEED
 
-    # stop bij grote beker (target bereikt)
     if area > STOP_AREA:
         return 0.0, 0.0, 0.0
 
     return vx, 0.0, omega
 
 # ============================================================
-# VISION LOOP (LEES SHM FRAMES + DETECTIE + WEB JPEG)
+# VISION LOOP
 # ============================================================
 
 async def vision_loop():
     global latest_jpeg
+
     while True:
         fcntl.flock(fd_frame, fcntl.LOCK_SH)
         try:
@@ -133,47 +167,57 @@ async def vision_loop():
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3,3), np.uint8), iterations=1)
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        bekers = [(x, y, w, h, cv2.contourArea(c)) 
-                  for c in contours 
-                  if MIN_BEKER_AREA < cv2.contourArea(c) < MAX_BEKER_AREA
-                  for x, y, w, h in [cv2.boundingRect(c)]]
 
-        # annotaties op frame
+        bekers = [
+            (x, y, w, h, cv2.contourArea(c))
+            for c in contours
+            if MIN_BEKER_AREA < cv2.contourArea(c) < MAX_BEKER_AREA
+            for x, y, w, h in [cv2.boundingRect(c)]
+        ]
+
         for x, y, w, h, area in bekers:
-            cx = x + w // 2
             cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0,255,0), 2)
-            cv2.putText(frame_bgr, f"BEKER", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
+            cv2.putText(frame_bgr, "BEKER", (x, y-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
 
-        # -------- OBSTAKELDETECTIE (ROI onder) --------
+        # -------- OBSTAKELDETECTIE --------
         roi = frame_bgr[int(HEIGHT*0.55):HEIGHT, :]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5,5), 0)
         edges = cv2.Canny(blur, 40, 120)
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
         obstakels = {"LINKS":0, "MIDDEN":0, "RECHTS":0}
+
         for cnt in contours:
             if cv2.contourArea(cnt) < MIN_OBSTAKEL_AREA:
                 continue
+
             x, y, w, h = cv2.boundingRect(cnt)
-            if w<12 or h<6:
+            if w < 12 or h < 6:
                 continue
-            cx = x + w//2
+
+            cx = x + w // 2
             zone = classify_zone(cx, WIDTH)
             obstakels[zone] += 1
+
             cv2.rectangle(roi, (x,y), (x+w,y+h), (0,0,255), 2)
+
         frame_bgr[int(HEIGHT*0.55):HEIGHT, :] = roi
 
-        # -------- COMPUTE COMMAND --------
+        # -------- COMMAND --------
         vx, vy, omega = compute_velocity(bekers, WIDTH)
         write_command(vx, vy, omega)
 
-        # -------- OVERLAY vx, vy, omega --------
-        status = f"vx:{vx:.2f} vy:{vy:.2f} omega:{omega:.2f} Bekers:{len(bekers)} Obst L/M/R: {obstakels}"
-        cv2.putText(frame_bgr, status, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+        status = f"vx:{vx:.2f} vy:{vy:.2f} omega:{omega:.2f} Bekers:{len(bekers)} Obst:{obstakels}"
+        cv2.putText(frame_bgr, status, (5, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
 
-        # -------- JPEG voor web --------
+        # -------- JPEG --------
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=70)
@@ -182,7 +226,7 @@ async def vision_loop():
         await asyncio.sleep(0.02)
 
 # ============================================================
-# WEBSERVER + WEBSOCKET
+# WEBSERVER
 # ============================================================
 
 HTML_PAGE = b"""\
@@ -191,15 +235,14 @@ Content-Type: text/html
 
 <!DOCTYPE html>
 <html>
-<head><title>Robot Vision</title></head>
 <body>
 <h2>Robot Vision</h2>
 <img id="cam" width="320">
 <script>
-let cam_ws = new WebSocket("ws://" + location.host + "/cam");
-cam_ws.binaryType = "blob";
-cam_ws.onmessage = (event) => {
-    document.getElementById("cam").src = URL.createObjectURL(event.data);
+let ws = new WebSocket("ws://" + location.host + "/cam");
+ws.binaryType = "blob";
+ws.onmessage = (e) => {
+    document.getElementById("cam").src = URL.createObjectURL(e.data);
 };
 </script>
 </body>
@@ -224,9 +267,11 @@ def websocket_handshake(request):
 async def handle_client(reader, writer):
     data = await reader.read(1024)
     request = data.decode(errors="ignore")
+
     if "Upgrade: websocket" in request and "/cam" in request:
         await handle_camera_ws(reader, writer, request)
         return
+
     writer.write(HTML_PAGE)
     await writer.drain()
     writer.close()
@@ -234,14 +279,17 @@ async def handle_client(reader, writer):
 async def handle_camera_ws(reader, writer, request):
     writer.write(websocket_handshake(request).encode())
     await writer.drain()
+
     try:
         while True:
             if latest_jpeg is None:
                 await asyncio.sleep(0.05)
                 continue
+
             data = latest_jpeg
             header = bytearray([0x82])
             length = len(data)
+
             if length < 126:
                 header.append(length)
             elif length < 65536:
@@ -250,11 +298,14 @@ async def handle_camera_ws(reader, writer, request):
             else:
                 header.append(127)
                 header += length.to_bytes(8, "big")
+
             writer.write(header + data)
             await writer.drain()
             await asyncio.sleep(0.05)
+
     except:
         pass
+
     writer.close()
 
 # ============================================================
@@ -264,6 +315,7 @@ async def handle_camera_ws(reader, writer, request):
 async def main():
     server = await asyncio.start_server(handle_client, "0.0.0.0", 8765)
     print("Server running on http://ROBOT_IP:8765")
+
     async with server:
         await asyncio.gather(
             server.serve_forever(),

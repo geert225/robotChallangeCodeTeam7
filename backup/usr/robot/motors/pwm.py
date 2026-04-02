@@ -101,10 +101,10 @@ def set_pwm(channel, duty):
 set_pwm_freq(800)  # 50 Hz voor servo
 
 motorMapping = [
-    (8, 9),   # Motor 0: kanaal 2 en 3 (links voor)
-    (12, 13),     # Motor 1: kanaal 0 en 1 (rechts voor)
-    (10, 11),   # Motor 2: kanaal 6 en 7 (links achter)
-    (14, 15)   # Motor 3: kanaal 4 en 5 (rechts achter)
+    (0, 1),   # Motor 0: kanaal 2 en 3 (links voor)
+    (2, 3),     # Motor 1: kanaal 0 en 1 (rechts voor)
+    (4, 5),   # Motor 2: kanaal 6 en 7 (links achter)
+    (6, 7)   # Motor 3: kanaal 4 en 5 (rechts achter)
 ]
 
 def set_motor(motor, procent):

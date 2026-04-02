@@ -2,8 +2,10 @@ import os
 import mmap
 import struct
 import time
+import fcntl
 
-from pwm import set_motor
+#from pwm import set_motor
+from motor import set_motor
 
 # =========================
 # CONFIG
@@ -24,15 +26,18 @@ LW = L + W
 R = 0.08
 
 num_encoders = 4
-encoder_signs = [1, -1, 1, 1]
+all_encoders = 5
+encoder_signs = [-1, 1, -1, 1]
+
+
 
 # =========================
 # ENCODER SHARED MEMORY
 # =========================
 shm_file_path = "/dev/shm/encoder_positions"
 fd = os.open(shm_file_path, os.O_CREAT | os.O_RDWR)
-os.ftruncate(fd, num_encoders*8)
-shared_mem = mmap.mmap(fd, num_encoders*8, mmap.MAP_SHARED, mmap.PROT_READ)
+os.ftruncate(fd, all_encoders*8)
+shared_mem = mmap.mmap(fd, all_encoders*8, mmap.MAP_SHARED, mmap.PROT_READ)
 os.close(fd)
 
 def read_encoder(i):
@@ -51,6 +56,30 @@ fd_cmd = os.open(CMD_SHM_PATH, os.O_CREAT | os.O_RDWR)
 os.ftruncate(fd_cmd, CMD_SIZE)
 cmd_mem = mmap.mmap(fd_cmd, CMD_SIZE, mmap.MAP_SHARED, mmap.PROT_READ)
 os.close(fd_cmd)
+
+
+LED_FORMAT = "<7B"  # mode, r1,g1,b1, r2,g2,b2
+SHM_PATH = "/dev/shm/led_ctrl"
+
+# ================= SHM HELPERS =================
+def create_or_open_shm(path, fmt):
+    size = struct.calcsize(fmt)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(b"\x00" * size)
+    f = open(path, "r+b")
+    shm = mmap.mmap(f.fileno(), size)
+    return shm, f
+
+def shm_write(shm, fd, fmt, values):
+    fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+    shm.seek(0)
+    shm.write(struct.pack(fmt, *values))
+    fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+# ================= INIT SHM =================
+shm_led, fd_led = create_or_open_shm(SHM_PATH, LED_FORMAT)
+
 
 def read_command():
     data = cmd_mem[:CMD_SIZE]
@@ -88,8 +117,8 @@ def mecanum_kinematics(vx, vy, omega):
 # =========================
 # SMOOTH ACCELERATION
 # =========================
-MAX_ACCEL = 8.0  # m/s^2
-MAX_OMEGA_ACCEL = 5.0
+MAX_ACCEL = 2.0  # m/s^2
+MAX_OMEGA_ACCEL = 3.0
 
 vx_cmd = 0.0
 vy_cmd = 0.0
@@ -130,6 +159,16 @@ while True:
     vy_cmd = slew(vy_cmd, vy_target, MAX_ACCEL)
     omega_cmd = slew(omega_cmd, omega_target, MAX_OMEGA_ACCEL)
 
+    if abs(vx_cmd) > 0.2:
+        if abs(vy_cmd) > 0.2:
+            shm_write(shm_led, fd_led, LED_FORMAT, (3, 255, 255, 0, 0, 255, 0))
+        else:
+            shm_write(shm_led, fd_led, LED_FORMAT, (1, 0, 255, 0, 0, 0, 0))
+    elif abs(vy_cmd) > 0.2:
+        shm_write(shm_led, fd_led, LED_FORMAT, (1, 255, 255, 0, 0, 255, 0))
+    else:
+        shm_write(shm_led, fd_led, LED_FORMAT, (2, 0, 255, 255, 0, 0, 0))
+
     target_rpms = mecanum_kinematics(vx_cmd, vy_cmd, omega_cmd)
 
     # normalize
@@ -157,15 +196,18 @@ while True:
     for i in range(num_encoders):
         error = target_rpms[i] - rpm_filtered[i]
         sync_error = rpm_filtered[i] - avg_rpm
-        total_error = error - 0.5*sync_error
+        total_error = error - 0.5 * sync_error
 
-        integrals[i] += total_error*DT
+        integrals[i] += total_error * DT
         integrals[i] = max(-INTEGRAL_LIMIT, min(INTEGRAL_LIMIT, integrals[i]))
 
         pwm_ff = feedforward_formula(target_rpms[i])
         pwm_pi = KP*total_error + KI*integrals[i]
         pwm = pwm_ff + pwm_pi
         pwm = max(-MAX_PWM, min(MAX_PWM, pwm))
+
+        if abs(pwm) < 20:
+            pwm = 0
 
         pwms.append(pwm)
         set_motor(i, pwm)

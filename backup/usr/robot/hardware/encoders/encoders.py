@@ -9,10 +9,11 @@ import struct
 # Encoder mapping
 # =========================
 ENCODER_MAPPING = {
-    'rotary@18': 1,   # Motor 1 (rechts voor)
-    'rotary@a': 0,   # Motor 0 (links voor)
-    'rotary@8': 3,   # Motor 3 (rechts achter)
-    'rotary@5': 2,  # Motor 2 (links achter)
+    'rotary@6': 1,   # Motor 1 (rechts voor) pos
+    'rotary@16': 0,   # Motor 0 (links voor) neg
+    'rotary@11': 3,   # Motor 3 (rechts achter) pos
+    'rotary@18': 2,  # Motor 2 (links achter) neg
+    'rotary@8': 4,  # Motor 4 (lai bak)
 }
 
 num_encoders = len(ENCODER_MAPPING)
@@ -78,6 +79,10 @@ try:
         for dev in r:
             for event in dev.read():
                 if event.type == ecodes.EV_REL:
+
+                    if dev.name not in ENCODER_MAPPING:
+                        continue  # sla onbekende devices over
+
                     index = ENCODER_MAPPING[dev.name]
                     current = read_position(index)
                     write_position(index, current + event.value)

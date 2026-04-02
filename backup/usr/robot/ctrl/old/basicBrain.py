@@ -33,7 +33,6 @@ os.ftruncate(fd_cmd, CMD_SIZE)
 cmd_mem = mmap.mmap(fd_cmd, CMD_SIZE, mmap.MAP_SHARED, mmap.PROT_WRITE)
 
 latest_jpeg = None
-last_dir_pos = False
 
 # ============================================================
 # DETECTIE PARAMETERS
@@ -45,19 +44,13 @@ MIN_BEKER_AREA = 50
 MAX_BEKER_AREA = 300000
 MIN_OBSTAKEL_AREA = 250
 
-BASE_SPEED = 4  # iets sneller
-MIN_SPEED = 0.35
-K_OMEGA = 2.8
-MAX_OMEGA = 4.0
+BASE_SPEED = 0.4
+MIN_SPEED = 0.2
+K_OMEGA = 1.2
+MAX_OMEGA = 0.8
 STOP_AREA = 9000
-SEARCH_OMEGA = 4.0  # rondjes draaien als niets gevonden
-ERROR_DEADBAND = 0.02  # ±2% frame midden
-DRIVE_SPEED = 2.0
-DRIVE_MIN_OMEGA = 1.5
-
-# ============================================================
-# HELPERS
-# ============================================================
+SEARCH_OMEGA = -0.6
+ERROR_DEADBAND = 0.05
 
 def classify_zone(x_center, frame_width):
     if x_center < frame_width * 0.33:
@@ -67,49 +60,31 @@ def classify_zone(x_center, frame_width):
     else:
         return "RECHTS"
 
+# ============================================================
+# HELPERS
+# ============================================================
+
 def write_command(vx, vy, omega):
     cmd_mem[:CMD_SIZE] = struct.pack("dddd", vx, vy, omega, time.time())
 
 def compute_velocity(bekers, frame_width):
-    global last_dir_pos
     if not bekers:
-        # niets gezien → rondjes draaien
-        if (last_dir_pos == True) :
-            return 0.0, 0.0, -SEARCH_OMEGA
-        else:
-            return 0.0, 0.0, SEARCH_OMEGA
-
-    # kies grootste beker
+        return 0.0, 0.0, SEARCH_OMEGA
+    # grootste beker kiezen
     x, y, w, h, area = max(bekers, key=lambda b: b[4])
     cx = x + w // 2
-
-    # bereken fout t.o.v. centrum
     error = (cx - frame_width // 2) / (frame_width // 2)
-
-    if(error < 0.0):
-        last_dir_pos = False
-    else: 
-        last_dir_pos = True
-
-    # als beker in centrale zone, niet draaien
     if abs(error) < ERROR_DEADBAND:
-        omega = 0.0
-    else:
-        omega = -K_OMEGA * error
-        omega = max(-MAX_OMEGA, min(MAX_OMEGA, omega))
-
-    # snelheid afhankelijk van hoek
+        error = 0
+    omega = -K_OMEGA * error
+    omega = max(-MAX_OMEGA, min(MAX_OMEGA, omega))
     speed_factor = max(0, 1 - 1.5 * abs(error))
-    
-    vx = 0.0
-    if omega < DRIVE_MIN_OMEGA:
-        vx = DRIVE_SPEED
-
-    # stop bij grote beker (target bereikt)
+    vx = BASE_SPEED * speed_factor
+    if vx < MIN_SPEED:
+        vx = MIN_SPEED
     if area > STOP_AREA:
         return 0.0, 0.0, 0.0
-
-    return vx, 0.0, omega
+    return 0.0, 0.0, omega
 
 # ============================================================
 # VISION LOOP (LEES SHM FRAMES + DETECTIE + WEB JPEG)
@@ -168,10 +143,6 @@ async def vision_loop():
         # -------- COMPUTE COMMAND --------
         vx, vy, omega = compute_velocity(bekers, WIDTH)
         write_command(vx, vy, omega)
-
-        # -------- OVERLAY vx, vy, omega --------
-        status = f"vx:{vx:.2f} vy:{vy:.2f} omega:{omega:.2f} Bekers:{len(bekers)} Obst L/M/R: {obstakels}"
-        cv2.putText(frame_bgr, status, (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
 
         # -------- JPEG voor web --------
         img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))

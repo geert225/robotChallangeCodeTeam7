@@ -9,8 +9,8 @@ import os
 PROCESS_COMMANDS = [
     ("ENCODERS", ["python", "../hardware/encoders/encoders.py"]),
     ("I2C", ["python", "../hardware/i2c/i2c.py"]),
-    ("CAMERA", ["python", "../hardware/camera/camera.py"]),
     ("MECANUM", ["python", "../motors/mecanum.py"]),
+    #("CAMERA", ["python", "../vision/camera.py"]),
 ]
 
 # Shutdown script
