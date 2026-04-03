@@ -24,14 +24,23 @@ PWM_FORMAT   = "<16H"
 ULTRA_FORMAT = "<ddHH"
 LED_FORMAT   = "<7B"
 SERVO_FORMAT = "<2B"
-GYRO_FORMAT  = "<dddd"  # (timestamp, roll, pitch, yaw)
+GYRO_FORMAT  = "<dddd"   # (timestamp, roll, pitch, yaw)   yaw in graden
+ACCEL_FORMAT = "<ddd"    # (timestamp, ax_world [m/s²], ay_world [m/s²])
+                         # wereldframe, zwaartekracht al afgetrokken
+
+# ── As-mapping: pas aan als de sensor anders gemonteerd is ──────────────────
+# +1 = as klopt, -1 = as omgekeerd.
+# Rijrichting voor = +X in wereldframe, links = +Y in wereldframe.
+ACCEL_SIGN_X =  1   # sensor-X richting t.o.v. robot-X (vooruit)
+ACCEL_SIGN_Y =  1   # sensor-Y richting t.o.v. robot-Y (links)
 
 SHM_CONFIG = {
     "/dev/shm/pwm_setpoints": PWM_FORMAT,
-    "/dev/shm/ultrasoon": ULTRA_FORMAT,
-    "/dev/shm/led_ctrl": LED_FORMAT,
-    "/dev/shm/servo": SERVO_FORMAT,
-    "/dev/shm/gyro": GYRO_FORMAT,
+    "/dev/shm/ultrasoon":     ULTRA_FORMAT,
+    "/dev/shm/led_ctrl":      LED_FORMAT,
+    "/dev/shm/servo":         SERVO_FORMAT,
+    "/dev/shm/gyro":          GYRO_FORMAT,
+    "/dev/shm/mpu_accel":     ACCEL_FORMAT,
 }
 
 # ================= SHM HELPERS =================
@@ -147,6 +156,7 @@ shm_ultra, fd_ultra = shms["/dev/shm/ultrasoon"]
 shm_led,   fd_led   = shms["/dev/shm/led_ctrl"]
 shm_servo, fd_servo = shms["/dev/shm/servo"]
 shm_gyro,  fd_gyro  = shms["/dev/shm/gyro"]
+shm_accel, fd_accel = shms["/dev/shm/mpu_accel"]
 
 # ================= GYRO CALIBRATION =================
 
@@ -277,7 +287,7 @@ while True:
                 print("Ultrasonic error:", e)
 
     # ------------------------
-    # Gyro (altijd updaten)
+    # Gyro + Accel (altijd updaten)
     # ------------------------
     try:
         gx, gy, gz = mpu.read_gyro_dps()
@@ -288,20 +298,41 @@ while True:
         gy -= bias_gy
         gz -= bias_gz
 
-        # Madgwick update
+        # Madgwick update (gebruikt genormeerde ax,ay,az intern)
         filter.update(gx, gy, gz, ax, ay, az, dt)
 
         roll, pitch, yaw = filter.get_euler()
 
-        # yaw drift damping
-        yaw *= 0.999
+        shm_write(shm_gyro, fd_gyro, GYRO_FORMAT, (now, roll, pitch, yaw))
 
-        shm_write(
-            shm_gyro,
-            fd_gyro,
-            GYRO_FORMAT,
-            (now, roll, pitch, yaw)
-        )
+        # ── Lineaire versnelling in wereldframe ──────────────────────────
+        # Zwaartekrachtsrichting in sensorframe afleiden uit Madgwick-quaternion.
+        # Gebaseerd op de gradiënt-vergelijkingen van Madgwick (f1,f2,f3):
+        #   f1 = 2(q1q3 - q0q2) - ax_n  →  zwaartekracht-x in sensorframe
+        #   f2 = 2(q0q1 + q2q3) - ay_n  →  zwaartekracht-y
+        #   f3 = 2(0.5 - q1²  - q2²) - az_n  →  zwaartekracht-z
+        q0, q1, q2, q3 = filter.q0, filter.q1, filter.q2, filter.q3
+
+        gx_s = 2.0 * (q1*q3 - q0*q2)               # g-eenheden, sensorframe
+        gy_s = 2.0 * (q0*q1 + q2*q3)
+        gz_s = 1.0 - 2.0*q1*q1 - 2.0*q2*q2
+
+        # Lineaire versnelling sensorframe [m/s²]: meet min zwaartekracht
+        ax_l = (ax - gx_s) * 9.81
+        ay_l = (ay - gy_s) * 9.81
+        az_l = (az - gz_s) * 9.81
+
+        # Roteer naar wereldframe met rotatiematrix uit quaternion
+        # Alleen x en y zijn nodig voor een rijdende robot op een vlakke vloer
+        ax_w = ((1 - 2*(q2*q2 + q3*q3)) * ax_l
+                +      2*(q1*q2 - q0*q3)  * ay_l
+                +      2*(q1*q3 + q0*q2)  * az_l) * ACCEL_SIGN_X
+
+        ay_w = (       2*(q1*q2 + q0*q3)  * ax_l
+                + (1 - 2*(q1*q1 + q3*q3)) * ay_l
+                +      2*(q2*q3 - q0*q1)  * az_l) * ACCEL_SIGN_Y
+
+        shm_write(shm_accel, fd_accel, ACCEL_FORMAT, (now, ax_w, ay_w))
 
     except Exception as e:
         print("MPU error:", e)

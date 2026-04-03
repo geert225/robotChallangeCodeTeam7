@@ -137,6 +137,32 @@ def led_auto_update(has_target: bool):
 #   d1 = voor,  d2 = achter
 # Afstanden in cm. Waarde 0 = geen data → geen beperking.
 # ============================================================
+# ============================================================
+# SHARED MEMORY — POSE  (geschreven door odometry.py)
+# Format: ddd  →  x [m], y [m], theta [rad]
+# ============================================================
+POSE_SHM_PATH = "/dev/shm/robot_pose"
+POSE_FMT      = "ddd"
+POSE_SIZE     = struct.calcsize(POSE_FMT)   # 24 bytes
+
+pose_shm, pose_fh = _create_or_open_shm(POSE_SHM_PATH, POSE_SIZE)
+
+def _read_pose():
+    """Leest (x, y, theta) uit shared memory van odometry.py. Geeft (0,0,0) bij fout."""
+    try:
+        pose_shm.seek(0)
+        raw = pose_shm.read(POSE_SIZE)
+        return struct.unpack(POSE_FMT, raw)
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+# ============================================================
+# SHARED MEMORY — ULTRASOON
+# Format: <ddHH  →  update_rate (double) + timestamp (double) + d1 (uint16) + d2 (uint16)
+# Sensororiëntatie (aanpassen op fysieke montage):
+#   d1 = voor,  d2 = achter
+# Afstanden in cm. Waarde 0 = geen data → geen beperking.
+# ============================================================
 ULTRA_SHM_PATH = "/dev/shm/ultrasoon"
 ULTRA_FMT      = "<ddHH"
 ULTRA_SIZE     = struct.calcsize(ULTRA_FMT)
@@ -406,9 +432,11 @@ async def handle_control_ws(reader, writer, request):
 
     _control_clients.add(writer)
 
-    # stuur huidige modus + actuele ultrasoon direct na verbinding
+    # stuur huidige modus + actuele ultrasoon + pose direct na verbinding
     await _ws_send_text(writer, f"mode:{robot_mode}")
     await _ws_send_text(writer, f"ultra:{_ultra_d1},{_ultra_d2}")
+    px, py, pth = _read_pose()
+    await _ws_send_text(writer, f"pose:{px:.4f},{py:.4f},{pth:.4f}")
 
     try:
         while True:
@@ -563,6 +591,21 @@ async def ultra_loop():
         await asyncio.sleep(0.1)
 
 # ============================================================
+# POSE LOOP  (leest odometry SHM en broadcast naar WS clients, 5 Hz)
+# ============================================================
+async def pose_loop():
+    while True:
+        if _control_clients:
+            px, py, pth = _read_pose()
+            msg = f"pose:{px:.4f},{py:.4f},{pth:.4f}"
+            for w in list(_control_clients):
+                try:
+                    await _ws_send_text(w, msg)
+                except Exception:
+                    _control_clients.discard(w)
+        await asyncio.sleep(0.2)   # 5 Hz is genoeg voor visualisatie
+
+# ============================================================
 # MAIN
 # ============================================================
 async def main():
@@ -579,6 +622,7 @@ async def main():
             vision_loop(),
             heartbeat(),
             ultra_loop(),
+            pose_loop(),
         )
 
 if __name__ == "__main__":
