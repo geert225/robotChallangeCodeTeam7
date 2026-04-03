@@ -131,6 +131,47 @@ def led_auto_update(has_target: bool):
         _led_blink_state = not _led_blink_state
 
 # ============================================================
+# SHARED MEMORY — ULTRASOON
+# Format: <ddHH  →  update_rate (double) + timestamp (double) + d1 (uint16) + d2 (uint16)
+# Sensororiëntatie (aanpassen op fysieke montage):
+#   d1 = voor,  d2 = achter
+# Afstanden in cm. Waarde 0 = geen data → geen beperking.
+# ============================================================
+ULTRA_SHM_PATH = "/dev/shm/ultrasoon"
+ULTRA_FMT      = "<ddHH"
+ULTRA_SIZE     = struct.calcsize(ULTRA_FMT)
+
+ultra_shm, ultra_fh = _create_or_open_shm(ULTRA_SHM_PATH, ULTRA_SIZE)
+
+_ultra_d1: int = 0    # laatste meting sensor1 (voor)
+_ultra_d2: int = 0    # laatste meting sensor2 (achter)
+
+def _read_ultra():
+    fcntl.flock(ultra_fh.fileno(), fcntl.LOCK_SH)
+    ultra_shm.seek(0)
+    raw = ultra_shm.read(ULTRA_SIZE)
+    fcntl.flock(ultra_fh.fileno(), fcntl.LOCK_UN)
+    _, _, d1, d2 = struct.unpack(ULTRA_FMT, raw)
+    return int(d1), int(d2)
+
+# ---- Obstacle avoidance drempelwaarden (cm) ----
+# Beide sensoren zitten aan de voorzijde.
+ULTRA_SAFE_CM = 15   # hard stop  — blokkeer vooruitrijden
+ULTRA_WARN_CM = 30   # vertraagzone — snelheid lineair afschalen
+
+def _apply_avoidance(vx: float, vy: float, omega: float):
+    """Past vx aan o.b.v. actuele ultrasoonwaarden (alleen AUTO). 0 = geen data → geen ingreep."""
+    if vx > 0:   # vooruit → check beide voor-sensoren, neem de kortste afstand
+        s1 = _ultra_d1 if _ultra_d1 > 0 else 9999
+        s2 = _ultra_d2 if _ultra_d2 > 0 else 9999
+        front = min(s1, s2)
+        if front <= ULTRA_SAFE_CM:
+            vx = 0.0
+        elif front < ULTRA_WARN_CM:
+            vx *= (front - ULTRA_SAFE_CM) / (ULTRA_WARN_CM - ULTRA_SAFE_CM)
+    return vx, vy, omega
+
+# ============================================================
 # SHARED MEMORY — VISION FRAME
 # ============================================================
 WIDTH, HEIGHT, CHANNELS = 320, 240, 3
@@ -141,6 +182,9 @@ VISION_FRAME_PATH  = "/dev/shm/vision_frame"
 vision_shm, vision_fh = _create_or_open_shm(VISION_FRAME_PATH, VISION_FRAME_TOTAL)
 
 latest_jpeg = None
+
+# Verbonden control-websocket clients (voor broadcast van ultrasoon-data)
+_control_clients: set = set()
 
 # ============================================================
 # MANUAL RIJSTATUS
@@ -267,6 +311,7 @@ async def vision_loop():
         # rijcommando + LED afhankelijk van modus
         if robot_mode == MODE_AUTO:
             vx, vy, omega = _compute_velocity(bekers, WIDTH)
+            vx, vy, omega = _apply_avoidance(vx, vy, omega)
             write_drive_cmd(vx, vy, omega)
 
             # LED: elke BLINK_TICKS ticks de blink-toestand wisselen
@@ -359,8 +404,11 @@ async def handle_control_ws(reader, writer, request):
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
 
-    # stuur huidige modus direct na verbinding
+    _control_clients.add(writer)
+
+    # stuur huidige modus + actuele ultrasoon direct na verbinding
     await _ws_send_text(writer, f"mode:{robot_mode}")
+    await _ws_send_text(writer, f"ultra:{_ultra_d1},{_ultra_d2}")
 
     try:
         while True:
@@ -421,6 +469,8 @@ async def handle_control_ws(reader, writer, request):
 
     except Exception as e:
         print(f"[control WS] fout: {e}")
+    finally:
+        _control_clients.discard(writer)
 
     # verbinding verloren → stop robot veilig
     write_drive_cmd(0.0, 0.0, 0.0)
@@ -493,6 +543,26 @@ async def heartbeat():
         await asyncio.sleep(0.05)
 
 # ============================================================
+# ULTRASOON LOOP  (leest SHM en broadcast naar alle WS-clients, 10 Hz)
+# ============================================================
+async def ultra_loop():
+    global _ultra_d1, _ultra_d2
+
+    while True:
+        d1, d2 = _read_ultra()
+        _ultra_d1, _ultra_d2 = d1, d2
+
+        if _control_clients:
+            msg = f"ultra:{d1},{d2}"
+            for w in list(_control_clients):
+                try:
+                    await _ws_send_text(w, msg)
+                except Exception:
+                    _control_clients.discard(w)
+
+        await asyncio.sleep(0.1)
+
+# ============================================================
 # MAIN
 # ============================================================
 async def main():
@@ -508,6 +578,7 @@ async def main():
             server.serve_forever(),
             vision_loop(),
             heartbeat(),
+            ultra_loop(),
         )
 
 if __name__ == "__main__":

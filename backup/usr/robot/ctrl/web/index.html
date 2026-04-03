@@ -18,6 +18,9 @@
   button {
     padding: 8px 16px; margin: 4px; border: none; border-radius: 6px;
     cursor: pointer; font-size: 0.95em;
+    user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
   }
   .btn-switch         { background: #e94560; color: #fff; }
   .btn-switch.auto    { background: #4ade80; color: #111; }
@@ -39,6 +42,22 @@
 
   .hidden   { display: none !important; }
   #auto-info { color: #4ade80; font-style: italic; margin: 6px 0; }
+
+  /* Ultrasoon display */
+  #ultra-panel {
+    display: flex; gap: 12px; margin: 10px 0; flex-wrap: wrap;
+  }
+  .ultra-sensor {
+    background: #0f1f3d; border-radius: 8px; padding: 8px 14px;
+    min-width: 120px; text-align: center;
+  }
+  .ultra-label { font-size: 0.75em; color: #aaa; margin-bottom: 4px; }
+  .ultra-val   { font-size: 1.6em; font-weight: bold; }
+  .ultra-unit  { font-size: 0.75em; color: #aaa; }
+  .dist-safe   { color: #4ade80; }   /* groen  > 30 cm  */
+  .dist-warn   { color: #f59e0b; }   /* oranje 15–30 cm */
+  .dist-danger { color: #ef4444; }   /* rood   < 15 cm  */
+  .dist-nodata { color: #666;    }   /* grijs  = 0      */
 </style>
 </head>
 <body>
@@ -64,29 +83,29 @@
   <div id="drive-grid">
     <div></div>
     <button class="btn-drive"
-      onmousedown="press('up')"       onmouseup="release()"
-      ontouchstart="press('up')"      ontouchend="release()">&#8593;</button>
+      onmousedown="press('up')"        onmouseup="release()"
+      ontouchstart="pressTouch('up',event)" ontouchend="release()" ontouchcancel="release()">&#8593;</button>
     <div></div>
 
     <button class="btn-drive"
-      onmousedown="press('left')"     onmouseup="release()"
-      ontouchstart="press('left')"    ontouchend="release()">&#8592;</button>
+      onmousedown="press('left')"      onmouseup="release()"
+      ontouchstart="pressTouch('left',event)" ontouchend="release()" ontouchcancel="release()">&#8592;</button>
     <button class="btn-drive"
-      onmousedown="press('stop')"     onmouseup="release()"
-      ontouchstart="press('stop')"    ontouchend="release()">&#9632;</button>
+      onmousedown="press('stop')"      onmouseup="release()"
+      ontouchstart="pressTouch('stop',event)" ontouchend="release()" ontouchcancel="release()">&#9632;</button>
     <button class="btn-drive"
-      onmousedown="press('right')"    onmouseup="release()"
-      ontouchstart="press('right')"   ontouchend="release()">&#8594;</button>
+      onmousedown="press('right')"     onmouseup="release()"
+      ontouchstart="pressTouch('right',event)" ontouchend="release()" ontouchcancel="release()">&#8594;</button>
 
     <button class="btn-drive"
-      onmousedown="press('rot_left')" onmouseup="release()"
-      ontouchstart="press('rot_left')" ontouchend="release()">&#8634;</button>
+      onmousedown="press('rot_left')"  onmouseup="release()"
+      ontouchstart="pressTouch('rot_left',event)" ontouchend="release()" ontouchcancel="release()">&#8634;</button>
     <button class="btn-drive"
-      onmousedown="press('down')"     onmouseup="release()"
-      ontouchstart="press('down')"    ontouchend="release()">&#8595;</button>
+      onmousedown="press('down')"      onmouseup="release()"
+      ontouchstart="pressTouch('down',event)" ontouchend="release()" ontouchcancel="release()">&#8595;</button>
     <button class="btn-drive"
       onmousedown="press('rot_right')" onmouseup="release()"
-      ontouchstart="press('rot_right')" ontouchend="release()">&#8635;</button>
+      ontouchstart="pressTouch('rot_right',event)" ontouchend="release()" ontouchcancel="release()">&#8635;</button>
   </div>
 </div>
 
@@ -94,13 +113,27 @@
 <div id="gripper-panel">
   <div><strong>Gripper</strong></div>
   <button class="btn-gripper"
-    onmousedown="send('gripper_jog:30')"  onmouseup="send('gripper_stop')"
-    ontouchstart="send('gripper_jog:30')" ontouchend="send('gripper_stop')">
+    onmousedown="send('gripper_jog:30')"               onmouseup="send('gripper_stop')"
+    ontouchstart="sendTouch('gripper_jog:30', event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
     &#9650; Gripper JOG
   </button>
   <button class="btn-auto-trigger" onclick="send('gripper_auto')">
     &#9654; Gripper AUTO
   </button>
+</div>
+
+<!-- Ultrasoon display (altijd zichtbaar) -->
+<div id="ultra-panel">
+  <div class="ultra-sensor">
+    <div class="ultra-label">&#8594; Voor rechts (S1)</div>
+    <div class="ultra-val dist-nodata" id="ultra-d1">--</div>
+    <div class="ultra-unit">cm</div>
+  </div>
+  <div class="ultra-sensor">
+    <div class="ultra-label">&#8592; Voor links (S2)</div>
+    <div class="ultra-val dist-nodata" id="ultra-d2">--</div>
+    <div class="ultra-unit">cm</div>
+  </div>
 </div>
 
 <!-- Camera -->
@@ -124,8 +157,25 @@ ws.onerror   = () => setStatus("Verbindingsfout");
 ws.onmessage = (e) => {
   if (e.data.startsWith("mode:")) {
     applyMode(e.data.split(":")[1]);
+  } else if (e.data.startsWith("ultra:")) {
+    const parts = e.data.slice(6).split(",");
+    updateUltra("ultra-d1", parseInt(parts[0]));
+    updateUltra("ultra-d2", parseInt(parts[1]));
   }
 };
+
+function updateUltra(id, cm) {
+  const el = document.getElementById(id);
+  if (cm === 0) {
+    el.textContent = "--";
+    el.className   = "ultra-val dist-nodata";
+  } else {
+    el.textContent = cm;
+    if      (cm < 15) el.className = "ultra-val dist-danger";
+    else if (cm < 30) el.className = "ultra-val dist-warn";
+    else              el.className = "ultra-val dist-safe";
+  }
+}
 
 function send(cmd) {
   if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
@@ -138,11 +188,23 @@ function setStatus(msg) {
 // Houd rijknop ingedrukt → blijf commando sturen
 function press(cmd) {
   if (mode !== "manual") return;
+  if (pressTimer !== null) return;   // voorkom dubbele timer (mouse + touch)
   send(cmd);
   pressTimer = setInterval(() => send(cmd), 80);
 }
+function pressTouch(cmd, e) {
+  e.preventDefault();                // blokkeert navolgende mousedown
+  press(cmd);
+}
+function sendTouch(cmd, e) {
+  e.preventDefault();                // blokkeert navolgende mousedown
+  send(cmd);
+}
 function release() {
-  clearInterval(pressTimer);
+  if (pressTimer !== null) {
+    clearInterval(pressTimer);
+    pressTimer = null;
+  }
   send("stop");
 }
 
