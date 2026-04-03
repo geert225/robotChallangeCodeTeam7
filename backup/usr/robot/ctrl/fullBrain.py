@@ -24,15 +24,40 @@ import asyncio
 import io
 import base64
 import hashlib
+import math
+import json
 from PIL import Image
 import numpy as np
 import cv2
+
+# ============================================================
+# CALIBRATIE  (HSV blob-detectie — wordt opgeslagen op schijf)
+# ============================================================
+_CALIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "calibration.json")
+
+def _load_calib_hsv():
+    try:
+        with open(_CALIB_PATH) as f:
+            d = json.load(f)
+        return np.array(d["hsv_lower"]), np.array(d["hsv_upper"])
+    except Exception:
+        return np.array([130, 140,  90]), np.array([150, 255, 220])
+
+def _save_calib():
+    try:
+        with open(_CALIB_PATH, "w") as f:
+            json.dump({"hsv_lower": LOWER_HSV.tolist(),
+                       "hsv_upper": UPPER_HSV.tolist()}, f)
+        print("[calib] opgeslagen")
+    except Exception as e:
+        print(f"[calib] fout: {e}")
 
 # ============================================================
 # ROBOT MODUS
 # ============================================================
 MODE_MANUAL = "manual"
 MODE_AUTO   = "auto"
+MODE_HOME   = "home"
 robot_mode  = MODE_MANUAL          # beginstand = MANUAL
 
 # ============================================================
@@ -72,6 +97,28 @@ GRIPPER_FMT      = "<id"
 GRIPPER_SIZE     = struct.calcsize(GRIPPER_FMT)
 
 gripper_shm, gripper_fh = _create_or_open_shm(GRIPPER_SHM_PATH, GRIPPER_SIZE)
+
+# Gripper snelheden (aanpasbaar via web, 0–100)
+gripper_jog_speed  = 30   # handmatige jog
+gripper_auto_speed = 60   # auto cyclus
+gripper_home_speed = 20   # vasthouden tijdens HOME
+
+# Encoder SHM (voor gripper-feedback, index 4)
+_ENC_SHM_PATH = "/dev/shm/encoder_positions"
+_fd_enc_g     = os.open(_ENC_SHM_PATH, os.O_CREAT | os.O_RDWR)
+os.ftruncate(_fd_enc_g, 5 * 8)
+_enc_mem_g    = mmap.mmap(_fd_enc_g, 5 * 8, mmap.MAP_SHARED, mmap.PROT_READ)
+os.close(_fd_enc_g)
+
+def _read_gripper_enc() -> int:
+    _enc_mem_g.seek(4 * 8)
+    return struct.unpack('q', _enc_mem_g.read(8))[0]
+
+# Gripper auto-cyclus state
+_GRIPPER_AUTO_TARGET_TICKS = 400   # standaard doelrotatie in encoder-ticks
+_gripper_overshoot         = 0     # ticks te veel bij vorige auto-cyclus
+_gripper_manual_jogged     = False # True als er handmatig gejogged is na laatste auto
+_gripper_pending_auto      = False # getriggerd vanuit WS
 
 def write_gripper_cmd(mode, speed=0.0):
     fcntl.flock(gripper_fh.fileno(), fcntl.LOCK_EX)
@@ -222,8 +269,7 @@ ROT_SPEED = 3.0
 # ============================================================
 # AUTO — VISIE PARAMETERS  (uit upgradedBasicBrain)
 # ============================================================
-LOWER_HSV       = np.array([130, 140,  90])
-UPPER_HSV       = np.array([150, 255, 220])
+LOWER_HSV, UPPER_HSV = _load_calib_hsv()
 MIN_BEKER_AREA  = 50
 MAX_BEKER_AREA  = 300_000
 MIN_OBST_AREA   = 250
@@ -426,17 +472,24 @@ async def _ws_send_text(writer, text: str):
 # ============================================================
 async def handle_control_ws(reader, writer, request):
     global robot_mode, drive_state, _blink_counter
+    global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
+    global LOWER_HSV, UPPER_HSV
+    global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
 
     _control_clients.add(writer)
 
-    # stuur huidige modus + actuele ultrasoon + pose direct na verbinding
+    # stuur huidige staat direct na verbinding
     await _ws_send_text(writer, f"mode:{robot_mode}")
     await _ws_send_text(writer, f"ultra:{_ultra_d1},{_ultra_d2}")
     px, py, pth = _read_pose()
     await _ws_send_text(writer, f"pose:{px:.4f},{py:.4f},{pth:.4f}")
+    await _ws_send_text(writer, f"home_strat:{home_strategy}")
+    await _ws_send_text(writer, f"gripper_speeds:{gripper_jog_speed},{gripper_auto_speed},{gripper_home_speed}")
+    lo, hi = LOWER_HSV.tolist(), UPPER_HSV.tolist()
+    await _ws_send_text(writer, f"hsv:{lo[0]},{lo[1]},{lo[2]},{hi[0]},{hi[1]},{hi[2]}")
 
     try:
         while True:
@@ -461,6 +514,41 @@ async def handle_control_ws(reader, writer, request):
                 print("[brain] → AUTO")
                 await _ws_send_text(writer, "mode:auto")
 
+            elif msg == "set_mode:home":
+                robot_mode  = MODE_HOME
+                drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
+                _blink_counter = 0
+                write_drive_cmd(0.0, 0.0, 0.0)
+                write_led(1, 0, 100, 255, 0, 100, 255)   # solide blauw tijdens HOME
+                print("[brain] → HOME")
+                await _ws_send_text(writer, "mode:home")
+
+            # ---- INSTELLINGEN ----
+            elif msg.startswith("set_home_strat:"):
+                home_strategy = msg.split(":", 1)[1].strip()
+                print(f"[brain] home strategie → {home_strategy}")
+                await _broadcast(f"home_strat:{home_strategy}")
+
+            elif msg.startswith("set_gripper_speeds:"):
+                try:
+                    parts = msg.split(":", 1)[1].split(",")
+                    gripper_jog_speed  = int(parts[0])
+                    gripper_auto_speed = int(parts[1])
+                    gripper_home_speed = int(parts[2])
+                    print(f"[brain] gripper speeds: jog={gripper_jog_speed} auto={gripper_auto_speed} home={gripper_home_speed}")
+                except Exception:
+                    pass
+
+            elif msg.startswith("set_hsv:"):
+                try:
+                    v = [int(x) for x in msg.split(":", 1)[1].split(",")]
+                    LOWER_HSV = np.array(v[0:3])
+                    UPPER_HSV = np.array(v[3:6])
+                    _save_calib()
+                    print(f"[brain] HSV → lower={LOWER_HSV.tolist()} upper={UPPER_HSV.tolist()}")
+                except Exception:
+                    pass
+
             # ---- RIJDEN (alleen in MANUAL) ----
             elif robot_mode == MODE_MANUAL:
                 if msg == "up":
@@ -481,8 +569,9 @@ async def handle_control_ws(reader, writer, request):
                 # ---- GRIPPER (alleen in MANUAL) ----
                 elif msg.startswith("gripper_jog:"):
                     try:
-                        spd = float(msg.split(":", 1)[1])
-                        write_gripper_cmd(GRIPPER_JOG, spd)
+                        direction = float(msg.split(":", 1)[1])  # +1 of -1
+                        write_gripper_cmd(GRIPPER_JOG, direction * gripper_jog_speed)
+                        _gripper_manual_jogged = True
                     except ValueError:
                         pass
 
@@ -606,6 +695,111 @@ async def pose_loop():
         await asyncio.sleep(0.2)   # 5 Hz is genoeg voor visualisatie
 
 # ============================================================
+# HOME LOOP  — stuurt robot terug naar positie (0, 0, 0)
+# Rijdt op 20 Hz; stopt automatisch en schakelt naar MANUAL.
+# ============================================================
+
+# ── Navigatiestrategie ───────────────────────────────────────────────────────
+# "holonomic" : rij in elke richting (mecanum, tegelijk draaien)
+# "forward"   : eerst draaien, dan rechtdoor rijden, dan draaien naar theta=0
+home_strategy = "holonomic"
+
+_FORWARD_ALIGN_TH = 0.12   # rad (~7°): acceptabele kopfout voordat vooruitrijden begint
+
+# ── P-regelaar instelling ────────────────────────────────────────────────────
+_HOME_K_POS    = 1.2   # versterkingsfactor positie [m/s per m fout]
+_HOME_K_OMEGA  = 4.0   # versterkingsfactor heading [rad/s per rad fout]
+_HOME_MAX_SPD  = 0.8   # maximale rijsnelheid [m/s]
+_HOME_MAX_OMG  = 2.5   # maximale rotatiesnelheid tijdens rijfase [rad/s]
+_HOME_FINAL_OMG = 0.8  # maximale rotatiesnelheid tijdens eindcorrectie [rad/s]
+_HOME_DONE_XY  = 0.12  # aankomstdrempel positie [m]  (12 cm)
+_HOME_DONE_TH  = 0.08  # aankomstdrempel heading [rad] (~5°)
+
+def _angle_wrap(a: float) -> float:
+    """Brengt hoek terug naar [-π, π]."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+async def _broadcast(msg: str):
+    """Stuurt tekst naar alle verbonden WebSocket-clients."""
+    for w in list(_control_clients):
+        try:
+            await _ws_send_text(w, msg)
+        except Exception:
+            _control_clients.discard(w)
+
+async def home_loop():
+    global robot_mode, drive_state, _blink_counter
+
+    while True:
+        if robot_mode != MODE_HOME:
+            await asyncio.sleep(0.05)
+            continue
+
+        px, py, pth = _read_pose()
+        dist   = math.sqrt(px*px + py*py)
+        th_err = _angle_wrap(-pth)   # fout t.o.v. theta=0
+
+        # ── Klaar? (positie EN heading binnen drempel) ────────────────────
+        if dist < _HOME_DONE_XY and abs(th_err) < _HOME_DONE_TH:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            write_gripper_cmd(GRIPPER_IDLE)
+            robot_mode  = MODE_MANUAL
+            drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
+            led_manual_update(0.0, 0.0, 0.0)
+            print("[brain] HOME bereikt → MANUAL")
+            await _broadcast("mode:manual")
+            await _broadcast("home:done")
+            await asyncio.sleep(0.05)
+            continue
+
+        if home_strategy == "forward":
+            # ── Strategie FORWARD: draaien → rechtdoor → draaien ─────────
+            if dist > _HOME_DONE_XY:
+                # Hoek vanuit huidige positie richting oorsprong (wereldframe)
+                angle_to_home = math.atan2(-py, -px)
+                align_err = _angle_wrap(angle_to_home - pth)
+
+                if abs(align_err) > _FORWARD_ALIGN_TH:
+                    # Fase 1: draai om oorsprong in te richten, niet rijden
+                    omega = _HOME_K_OMEGA * align_err
+                    omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
+                    write_drive_cmd(0.0, 0.0, omega)
+                else:
+                    # Fase 2: rechtdoor rijden + kleine kopscorrectie
+                    vx_robot = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+                    omega    = _HOME_K_OMEGA * align_err
+                    omega    = max(-_HOME_MAX_OMG * 0.4, min(_HOME_MAX_OMG * 0.4, omega))
+                    write_drive_cmd(vx_robot, 0.0, omega)
+            else:
+                # Fase 3: op positie, draai naar theta=0
+                omega = _HOME_K_OMEGA * th_err
+                omega = max(-_HOME_FINAL_OMG, min(_HOME_FINAL_OMG, omega))
+                write_drive_cmd(0.0, 0.0, omega)
+
+        else:
+            # ── Strategie HOLONOMIC: rij in elke richting tegelijk ────────
+            omega_lim = _HOME_MAX_OMG if dist > _HOME_DONE_XY else _HOME_FINAL_OMG
+            omega = _HOME_K_OMEGA * th_err
+            omega = max(-omega_lim, min(omega_lim, omega))
+
+            vx_w = _HOME_K_POS * (-px)
+            vy_w = _HOME_K_POS * (-py)
+            spd  = math.sqrt(vx_w*vx_w + vy_w*vy_w)
+            max_spd = _HOME_MAX_SPD if dist > _HOME_DONE_XY else min(_HOME_MAX_SPD, dist * 2.0)
+            if spd > max_spd:
+                vx_w *= max_spd / spd
+                vy_w *= max_spd / spd
+
+            cos_t    = math.cos(pth)
+            sin_t    = math.sin(pth)
+            vx_robot =  vx_w * cos_t + vy_w * sin_t
+            vy_robot = -vx_w * sin_t + vy_w * cos_t
+            write_drive_cmd(vx_robot, vy_robot, omega)
+
+        await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
+        await asyncio.sleep(0.05)   # 20 Hz
+
+# ============================================================
 # MAIN
 # ============================================================
 async def main():
@@ -623,6 +817,7 @@ async def main():
             heartbeat(),
             ultra_loop(),
             pose_loop(),
+            home_loop()
         )
 
 if __name__ == "__main__":

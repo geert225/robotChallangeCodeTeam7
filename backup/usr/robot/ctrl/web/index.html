@@ -5,190 +5,328 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Robot Control</title>
 <style>
-  body { font-family: sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 12px; }
-  h2   { margin: 0 0 10px; }
+  *, *::before, *::after { box-sizing: border-box; }
 
-  #modebadge {
-    display: inline-block; padding: 4px 14px; border-radius: 20px;
-    font-weight: bold; font-size: 1.1em; margin-right: 10px;
+  body {
+    font-family: sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    margin: 0;
+    padding: 10px 12px;
   }
-  .badge-manual { background: #0f3460; color: #e94560; }
-  .badge-auto   { background: #0f5c2e; color: #4ade80; }
 
+  /* ── Header ─────────────────────────────────────────────────── */
+  #header {
+    display: flex; align-items: center; gap: 10px;
+    flex-wrap: wrap; margin-bottom: 8px;
+  }
+  #header h2 { margin: 0; font-size: 1.15em; color: #c9d1d9; white-space: nowrap; }
+  #modebadge {
+    padding: 3px 12px; border-radius: 20px;
+    font-weight: bold; font-size: 0.95em; white-space: nowrap;
+  }
+  .badge-manual { background: #0d2d5e; color: #58a6ff; }
+  .badge-auto   { background: #0e3a1f; color: #3fb950; }
+  .badge-home   { background: #3b1c00; color: #f0883e; }
+  #header-btns { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+
+  /* ── Buttons ─────────────────────────────────────────────────── */
   button {
-    padding: 8px 16px; margin: 4px; border: none; border-radius: 6px;
-    cursor: pointer; font-size: 0.95em;
+    padding: 7px 14px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 0.9em; font-weight: 500;
     user-select: none; -webkit-user-select: none;
     -webkit-tap-highlight-color: transparent;
     touch-action: manipulation;
   }
-  .btn-switch         { background: #e94560; color: #fff; }
-  .btn-switch.auto    { background: #4ade80; color: #111; }
-  .btn-drive          { background: #0f3460; color: #eee; font-size: 1.3em; width: 60px; height: 54px; }
-  .btn-gripper        { background: #2d2d54; color: #eee; }
-  .btn-auto-trigger   { background: #f59e0b; color: #111; font-weight: bold; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .btn-switch       { background: #21262d; color: #58a6ff; border: 1px solid #30363d; }
+  .btn-switch.auto  { background: #0e3a1f; color: #3fb950; border-color: #238636; }
+  .btn-home         { background: #bb5a00; color: #fff; }
+  .btn-home.active  { background: #b91c1c; }
+  .btn-drive        { background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+                      font-size: 1.4em; width: 58px; height: 52px; }
+  .btn-drive:active { background: #1f2937; }
+  .btn-gripper      { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
+  .btn-auto-trigger { background: #b45309; color: #fff; }
+  .btn-small        { background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                      font-size: 0.78em; padding: 4px 9px; }
+  .btn-settings     { background: #21262d; color: #8b949e; border: 1px solid #30363d;
+                      font-size: 0.8em; padding: 5px 10px; }
 
-  #controls    { margin: 10px 0; }
-  #drive-grid  {
-    display: grid;
-    grid-template-columns: repeat(3, 60px);
-    gap: 4px;
-    margin: 8px 0;
-  }
+  /* ── Status / info bars ─────────────────────────────────────── */
+  #status { font-size: 0.8em; color: #8b949e; margin-bottom: 6px; }
+  .info-bar { border-radius: 6px; padding: 7px 12px; margin-bottom: 8px;
+              font-size: 0.88em; display: none; }
+  #auto-info { background: #0e3a1f; border-left: 3px solid #3fb950; color: #7ee787; }
+  #home-info { background: #3b1c00; border-left: 3px solid #f0883e; color: #fdba74; }
+  #home-dist { font-weight: bold; }
 
-  #gripper-panel { margin: 10px 0; }
-  #status        { font-size: 0.85em; color: #aaa; margin: 6px 0; }
-  #cam           { display: block; margin-top: 10px; border: 2px solid #444; border-radius: 6px; }
+  /* ── Main layout ─────────────────────────────────────────────── */
+  #main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  #left-col  { flex: 0 0 auto; }
+  #right-col { flex: 1 1 260px; min-width: 0; }
 
-  .hidden   { display: none !important; }
-  #auto-info { color: #4ade80; font-style: italic; margin: 6px 0; }
+  /* ── Drive ───────────────────────────────────────────────────── */
+  #controls { margin-bottom: 10px; }
+  .section-label {
+    font-size: 0.75em; color: #8b949e; text-transform: uppercase;
+    letter-spacing: 0.06em; margin-bottom: 5px;
+  }
+  #drive-grid { display: grid; grid-template-columns: repeat(3, 58px); gap: 4px; }
+  #gripper-panel { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
 
-  /* Ultrasoon display */
-  #ultra-panel {
-    display: flex; gap: 12px; margin: 10px 0; flex-wrap: wrap;
-  }
-  .ultra-sensor {
-    background: #0f1f3d; border-radius: 8px; padding: 8px 14px;
-    min-width: 120px; text-align: center;
-  }
-  .ultra-label { font-size: 0.75em; color: #aaa; margin-bottom: 4px; }
-  .ultra-val   { font-size: 1.6em; font-weight: bold; }
-  .ultra-unit  { font-size: 0.75em; color: #aaa; }
-  .dist-safe   { color: #4ade80; }   /* groen  > 30 cm  */
-  .dist-warn   { color: #f59e0b; }   /* oranje 15–30 cm */
-  .dist-danger { color: #ef4444; }   /* rood   < 15 cm  */
-  .dist-nodata { color: #666;    }   /* grijs  = 0      */
+  /* ── Sensors row ─────────────────────────────────────────────── */
+  #sensors-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .sensor-card { background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 7px 12px; text-align: center; min-width: 110px; }
+  .sensor-lbl  { font-size: 0.7em; color: #8b949e; margin-bottom: 3px; }
+  .sensor-val  { font-size: 1.5em; font-weight: bold; }
+  .sensor-unit { font-size: 0.7em; color: #8b949e; }
+  .dist-safe   { color: #3fb950; }
+  .dist-warn   { color: #d29922; }
+  .dist-danger { color: #f85149; }
+  .dist-nodata { color: #484f58; }
+  #pose-card   { background: #161b22; border: 1px solid #30363d;
+    border-radius: 8px; padding: 7px 12px; min-width: 130px; }
+  #pose-card .sensor-val { font-size: 1.1em; color: #58a6ff; }
 
-  /* Positie / mini-kaart */
-  #pose-panel {
-    margin: 10px 0; display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start;
-  }
-  #pose-coords {
-    background: #0f1f3d; border-radius: 8px; padding: 8px 14px; min-width: 150px;
-  }
-  #pose-coords .lbl { font-size: 0.72em; color: #aaa; margin-bottom: 2px; }
-  #pose-coords .val { font-size: 1.3em; font-weight: bold; color: #67e8f9; }
-  #pose-coords .val span { font-size: 0.7em; color: #aaa; }
+  /* ── Map ─────────────────────────────────────────────────────── */
+  #map-wrap { margin-bottom: 8px; }
+  #map-canvas { border: 1px solid #30363d; border-radius: 8px; display: block;
+    background: #0a0e14; cursor: crosshair; width: 100%; max-width: 320px; }
+  #map-btns { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 
-  #map-wrap {
-    position: relative;
+  /* ── Camera ──────────────────────────────────────────────────── */
+  #cam { display: block; border: 1px solid #30363d; border-radius: 8px;
+         width: 100%; max-width: 320px; }
+
+  /* ── Settings panel ──────────────────────────────────────────── */
+  #settings-panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px; margin-top: 12px; display: none;
   }
-  #map-canvas {
-    border: 2px solid #334; border-radius: 8px; display: block;
-    background: #0a0a1a; cursor: crosshair;
-  }
-  #map-btns { margin-top: 4px; }
-  #map-btns button {
-    background: #1e3a5f; color: #ccc; font-size: 0.8em;
-    padding: 4px 10px; margin: 2px;
-  }
-  #map-btns button:hover { background: #2a5282; }
+  #settings-panel h3 { margin: 0 0 12px; font-size: 0.95em; color: #c9d1d9; }
+  .settings-section { margin-bottom: 14px; }
+  .settings-section > .section-label { margin-bottom: 6px; display: block; }
+
+  /* Home strategie toggle */
+  .strat-btns { display: flex; gap: 6px; }
+  .strat-btn { background: #21262d; color: #8b949e; border: 1px solid #30363d;
+               padding: 6px 12px; font-size: 0.85em; border-radius: 6px; cursor: pointer; }
+  .strat-btn.active { background: #1f6feb; color: #fff; border-color: #388bfd; }
+
+  /* Sliders */
+  .slider-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .slider-row label { width: 120px; font-size: 0.82em; color: #8b949e; flex-shrink: 0; }
+  .slider-row input[type=range] { flex: 1; accent-color: #388bfd; }
+  .slider-row .val { width: 36px; text-align: right; font-size: 0.85em;
+                     color: #58a6ff; font-weight: bold; }
+
+  /* HSV preview */
+  #hsv-preview { width: 100%; height: 28px; border-radius: 6px; margin-top: 8px;
+                 border: 1px solid #30363d; }
+  #hsv-save-hint { font-size: 0.75em; color: #3fb950; margin-top: 4px; display: none; }
+
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 
-<h2>
+<!-- ── Header ──────────────────────────────────────────────────── -->
+<div id="header">
   <span id="modebadge" class="badge-manual">MANUAL</span>
-  Robot Control
-</h2>
-
-<div id="status">Verbinden...</div>
-
-<!-- Modus wisselen -->
-<div>
-  <button id="btn-switch" class="btn-switch" onclick="switchMode()">Start AUTO</button>
-</div>
-
-<!-- AUTO info -->
-<div id="auto-info" class="hidden">Robot rijdt autonoom op vision.</div>
-
-<!-- MANUAL rijbediening -->
-<div id="controls">
-  <div><strong>Rijden</strong> <small>(pijltjes of knoppen)</small></div>
-  <div id="drive-grid">
-    <div></div>
-    <button class="btn-drive"
-      onmousedown="press('up')"        onmouseup="release()"
-      ontouchstart="pressTouch('up',event)" ontouchend="release()" ontouchcancel="release()">&#8593;</button>
-    <div></div>
-
-    <button class="btn-drive"
-      onmousedown="press('left')"      onmouseup="release()"
-      ontouchstart="pressTouch('left',event)" ontouchend="release()" ontouchcancel="release()">&#8592;</button>
-    <button class="btn-drive"
-      onmousedown="press('stop')"      onmouseup="release()"
-      ontouchstart="pressTouch('stop',event)" ontouchend="release()" ontouchcancel="release()">&#9632;</button>
-    <button class="btn-drive"
-      onmousedown="press('right')"     onmouseup="release()"
-      ontouchstart="pressTouch('right',event)" ontouchend="release()" ontouchcancel="release()">&#8594;</button>
-
-    <button class="btn-drive"
-      onmousedown="press('rot_left')"  onmouseup="release()"
-      ontouchstart="pressTouch('rot_left',event)" ontouchend="release()" ontouchcancel="release()">&#8634;</button>
-    <button class="btn-drive"
-      onmousedown="press('down')"      onmouseup="release()"
-      ontouchstart="pressTouch('down',event)" ontouchend="release()" ontouchcancel="release()">&#8595;</button>
-    <button class="btn-drive"
-      onmousedown="press('rot_right')" onmouseup="release()"
-      ontouchstart="pressTouch('rot_right',event)" ontouchend="release()" ontouchcancel="release()">&#8635;</button>
+  <h2>Robot Control</h2>
+  <div id="header-btns">
+    <button id="btn-switch" class="btn-switch" onclick="switchMode()">Start AUTO</button>
+    <button id="btn-home"   class="btn-home"   onclick="toggleHome()">&#8617; Naar 0</button>
+    <button class="btn-settings" onclick="toggleSettings()">&#9881; Instellingen</button>
   </div>
 </div>
 
-<!-- MANUAL gripper bediening -->
-<div id="gripper-panel">
-  <div><strong>Gripper</strong></div>
-  <button class="btn-gripper"
-    onmousedown="send('gripper_jog:30')"               onmouseup="send('gripper_stop')"
-    ontouchstart="sendTouch('gripper_jog:30', event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
-    &#9650; Gripper JOG
-  </button>
-  <button class="btn-auto-trigger" onclick="send('gripper_auto')">
-    &#9654; Gripper AUTO
-  </button>
+<div id="status">Verbinden&hellip;</div>
+
+<!-- ── Info bars ───────────────────────────────────────────────── -->
+<div id="auto-info" class="info-bar">&#9654; Robot rijdt autonoom op vision.</div>
+<div id="home-info" class="info-bar">
+  &#8617; Navigeert naar startpositie&hellip; &nbsp;
+  Afstand: <span id="home-dist">--</span> cm &nbsp;|&nbsp;
+  Heading: <span id="home-heading">--</span>&deg;
 </div>
 
-<!-- Ultrasoon display (altijd zichtbaar) -->
-<div id="ultra-panel">
-  <div class="ultra-sensor">
-    <div class="ultra-label">&#8594; Voor rechts (S1)</div>
-    <div class="ultra-val dist-nodata" id="ultra-d1">--</div>
-    <div class="ultra-unit">cm</div>
+<!-- ── Sensor row ───────────────────────────────────────────────── -->
+<div id="sensors-row">
+  <div class="sensor-card">
+    <div class="sensor-lbl">Ultrason rechts</div>
+    <div class="sensor-val dist-nodata" id="ultra-d1">--</div>
+    <div class="sensor-unit">cm</div>
   </div>
-  <div class="ultra-sensor">
-    <div class="ultra-label">&#8592; Voor links (S2)</div>
-    <div class="ultra-val dist-nodata" id="ultra-d2">--</div>
-    <div class="ultra-unit">cm</div>
+  <div class="sensor-card">
+    <div class="sensor-lbl">Ultrason links</div>
+    <div class="sensor-val dist-nodata" id="ultra-d2">--</div>
+    <div class="sensor-unit">cm</div>
+  </div>
+  <div id="pose-card" class="sensor-card">
+    <div class="sensor-lbl">X &nbsp;/&nbsp; Y &nbsp;/&nbsp; &theta;</div>
+    <div class="sensor-val">
+      <span id="pose-x">--</span> / <span id="pose-y">--</span> m
+    </div>
+    <div class="sensor-unit"><span id="pose-th">--</span> &deg;</div>
   </div>
 </div>
 
-<!-- Positie & mini-kaart -->
-<div id="pose-panel">
-  <div id="pose-coords">
-    <div class="lbl">X (vooruit)</div>
-    <div class="val" id="pose-x">--<span> m</span></div>
-    <div class="lbl">Y (zijwaarts)</div>
-    <div class="val" id="pose-y">--<span> m</span></div>
-    <div class="lbl">Heading</div>
-    <div class="val" id="pose-th">--<span> °</span></div>
-  </div>
-  <div id="map-wrap">
-    <canvas id="map-canvas" width="260" height="260"></canvas>
-    <div id="map-btns">
-      <button onclick="resetPose()">Reset nulpunt</button>
-      <button onclick="mapZoomIn()">+</button>
-      <button onclick="mapZoomOut()">-</button>
+<!-- ── Main: left + right ──────────────────────────────────────── -->
+<div id="main">
+  <div id="left-col">
+    <div id="controls">
+      <div class="section-label">Rijden <small style="text-transform:none;letter-spacing:0">(pijltjes / &#91;&#93;)</small></div>
+      <div id="drive-grid">
+        <div></div>
+        <button class="btn-drive"
+          onmousedown="press('up')"       onmouseup="release()"
+          ontouchstart="pressTouch('up',event)" ontouchend="release()" ontouchcancel="release()">&#8593;</button>
+        <div></div>
+        <button class="btn-drive"
+          onmousedown="press('left')"     onmouseup="release()"
+          ontouchstart="pressTouch('left',event)" ontouchend="release()" ontouchcancel="release()">&#8592;</button>
+        <button class="btn-drive"
+          onmousedown="press('stop')"     onmouseup="release()"
+          ontouchstart="pressTouch('stop',event)" ontouchend="release()" ontouchcancel="release()">&#9632;</button>
+        <button class="btn-drive"
+          onmousedown="press('right')"    onmouseup="release()"
+          ontouchstart="pressTouch('right',event)" ontouchend="release()" ontouchcancel="release()">&#8594;</button>
+        <button class="btn-drive"
+          onmousedown="press('rot_left')" onmouseup="release()"
+          ontouchstart="pressTouch('rot_left',event)" ontouchend="release()" ontouchcancel="release()">&#8634;</button>
+        <button class="btn-drive"
+          onmousedown="press('down')"     onmouseup="release()"
+          ontouchstart="pressTouch('down',event)" ontouchend="release()" ontouchcancel="release()">&#8595;</button>
+        <button class="btn-drive"
+          onmousedown="press('rot_right')" onmouseup="release()"
+          ontouchstart="pressTouch('rot_right',event)" ontouchend="release()" ontouchcancel="release()">&#8635;</button>
+      </div>
+    </div>
+
+    <div id="gripper-panel">
+      <div class="section-label">Gripper</div>
+      <button class="btn-gripper"
+        onmousedown="send('gripper_jog:1')"              onmouseup="send('gripper_stop')"
+        ontouchstart="sendTouch('gripper_jog:1',event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
+        &#9650; Gripper JOG+
+      </button>
+      <button class="btn-gripper"
+        onmousedown="send('gripper_jog:-1')"              onmouseup="send('gripper_stop')"
+        ontouchstart="sendTouch('gripper_jog:-1',event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
+        &#9660; Gripper JOG&minus;
+      </button>
+      <button class="btn-auto-trigger" onclick="send('gripper_auto')">
+        &#9654; Gripper AUTO
+      </button>
     </div>
   </div>
+
+  <div id="right-col">
+    <div id="map-wrap">
+      <canvas id="map-canvas" width="320" height="260"></canvas>
+      <div id="map-btns">
+        <button class="btn-small" onclick="resetPose()">Reset nulpunt</button>
+        <button class="btn-small" onclick="mapZoomIn()">&#43;</button>
+        <button class="btn-small" onclick="mapZoomOut()">&minus;</button>
+      </div>
+    </div>
+    <img id="cam" alt="camera">
+  </div>
 </div>
 
-<!-- Camera -->
-<img id="cam" width="320" alt="camera">
+<!-- ── Settings panel ──────────────────────────────────────────── -->
+<div id="settings-panel">
+  <h3>&#9881; Instellingen</h3>
+
+  <!-- HOME strategie -->
+  <div class="settings-section">
+    <span class="section-label">HOME navigatiestrategie</span>
+    <div class="strat-btns">
+      <button class="strat-btn active" id="strat-holonomic" onclick="setStrat('holonomic')">
+        &#8859; Holonomic (alle richtingen)
+      </button>
+      <button class="strat-btn" id="strat-forward" onclick="setStrat('forward')">
+        &#8593; Forward-only (draaien &rarr; rijden)
+      </button>
+    </div>
+  </div>
+
+  <!-- Gripper snelheden -->
+  <div class="settings-section">
+    <span class="section-label">Gripper snelheden (0–100)</span>
+    <div class="slider-row">
+      <label>Jog snelheid</label>
+      <input type="range" min="0" max="100" value="30" id="sl-jog"
+             oninput="sliderVal('sl-jog','sv-jog'); sendGripperSpeeds()">
+      <span class="val" id="sv-jog">30</span>
+    </div>
+    <div class="slider-row">
+      <label>Auto full speed</label>
+      <input type="range" min="0" max="100" value="60" id="sl-auto"
+             oninput="sliderVal('sl-auto','sv-auto'); sendGripperSpeeds()">
+      <span class="val" id="sv-auto">60</span>
+    </div>
+    <div class="slider-row">
+      <label>Home vasthoudsnelheid</label>
+      <input type="range" min="0" max="100" value="20" id="sl-home-g"
+             oninput="sliderVal('sl-home-g','sv-home-g'); sendGripperSpeeds()">
+      <span class="val" id="sv-home-g">20</span>
+    </div>
+  </div>
+
+  <!-- HSV calibratie -->
+  <div class="settings-section">
+    <span class="section-label">Blob detectie HSV-bereik (auto-opgeslagen)</span>
+    <div class="slider-row">
+      <label>H min (0–180)</label>
+      <input type="range" min="0" max="180" value="130" id="sl-hl"
+             oninput="sliderVal('sl-hl','sv-hl'); updateHSV()">
+      <span class="val" id="sv-hl">130</span>
+    </div>
+    <div class="slider-row">
+      <label>S min (0–255)</label>
+      <input type="range" min="0" max="255" value="140" id="sl-sl"
+             oninput="sliderVal('sl-sl','sv-sl'); updateHSV()">
+      <span class="val" id="sv-sl">140</span>
+    </div>
+    <div class="slider-row">
+      <label>V min (0–255)</label>
+      <input type="range" min="0" max="255" value="90" id="sl-vl"
+             oninput="sliderVal('sl-vl','sv-vl'); updateHSV()">
+      <span class="val" id="sv-vl">90</span>
+    </div>
+    <div class="slider-row">
+      <label>H max (0–180)</label>
+      <input type="range" min="0" max="180" value="150" id="sl-hh"
+             oninput="sliderVal('sl-hh','sv-hh'); updateHSV()">
+      <span class="val" id="sv-hh">150</span>
+    </div>
+    <div class="slider-row">
+      <label>S max (0–255)</label>
+      <input type="range" min="0" max="255" value="255" id="sl-sh"
+             oninput="sliderVal('sl-sh','sv-sh'); updateHSV()">
+      <span class="val" id="sv-sh">255</span>
+    </div>
+    <div class="slider-row">
+      <label>V max (0–255)</label>
+      <input type="range" min="0" max="255" value="220" id="sl-vh"
+             oninput="sliderVal('sl-vh','sv-vh'); updateHSV()">
+      <span class="val" id="sv-vh">220</span>
+    </div>
+    <canvas id="hsv-preview" width="320" height="28"></canvas>
+    <div id="hsv-save-hint">&#10003; Opgeslagen</div>
+  </div>
+</div>
 
 <script>
-let ws        = new WebSocket("ws://" + location.host + "/ws");
-let camWs     = new WebSocket("ws://" + location.host + "/cam");
-let mode      = "manual";
+let ws       = new WebSocket("ws://" + location.host + "/ws");
+let camWs    = new WebSocket("ws://" + location.host + "/cam");
+let mode     = "manual";
 let pressTimer = null;
+let settingsOpen = false;
 
 camWs.binaryType = "blob";
 camWs.onmessage  = (e) => {
@@ -200,109 +338,204 @@ ws.onopen    = () => setStatus("Verbonden");
 ws.onclose   = () => setStatus("Verbinding verbroken");
 ws.onerror   = () => setStatus("Verbindingsfout");
 ws.onmessage = (e) => {
-  if (e.data.startsWith("mode:")) {
-    applyMode(e.data.split(":")[1]);
-  } else if (e.data.startsWith("ultra:")) {
-    const parts = e.data.slice(6).split(",");
-    updateUltra("ultra-d1", parseInt(parts[0]));
-    updateUltra("ultra-d2", parseInt(parts[1]));
-  } else if (e.data.startsWith("pose:")) {
-    const p = e.data.slice(5).split(",").map(Number);
+  const d = e.data;
+  if (d.startsWith("mode:")) {
+    applyMode(d.slice(5));
+  } else if (d.startsWith("ultra:")) {
+    const p = d.slice(6).split(",");
+    updateUltra("ultra-d1", parseInt(p[0]));
+    updateUltra("ultra-d2", parseInt(p[1]));
+  } else if (d.startsWith("pose:")) {
+    const p = d.slice(5).split(",").map(Number);
     updatePose(p[0], p[1], p[2]);
+  } else if (d.startsWith("home:dist:")) {
+    const p = d.slice(10).split(",");
+    document.getElementById("home-dist").textContent    = (parseFloat(p[0]) * 100).toFixed(1);
+    document.getElementById("home-heading").textContent = parseFloat(p[1]).toFixed(1);
+  } else if (d === "home:done") {
+    setStatus("Startpositie bereikt!");
+  } else if (d.startsWith("home_strat:")) {
+    applyStrat(d.slice(11));
+  } else if (d.startsWith("gripper_speeds:")) {
+    const p = d.slice(15).split(",").map(Number);
+    setSlider("sl-jog",    "sv-jog",    p[0]);
+    setSlider("sl-auto",   "sv-auto",   p[1]);
+    setSlider("sl-home-g", "sv-home-g", p[2]);
+  } else if (d.startsWith("hsv:")) {
+    const v = d.slice(4).split(",").map(Number);
+    setSlider("sl-hl","sv-hl", v[0]); setSlider("sl-sl","sv-sl", v[1]); setSlider("sl-vl","sv-vl", v[2]);
+    setSlider("sl-hh","sv-hh", v[3]); setSlider("sl-sh","sv-sh", v[4]); setSlider("sl-vh","sv-vh", v[5]);
+    drawHsvPreview();
   }
 };
 
 function updateUltra(id, cm) {
   const el = document.getElementById(id);
-  if (cm === 0) {
-    el.textContent = "--";
-    el.className   = "ultra-val dist-nodata";
-  } else {
+  if (cm === 0) { el.textContent = "--"; el.className = "sensor-val dist-nodata"; }
+  else {
     el.textContent = cm;
-    if      (cm < 15) el.className = "ultra-val dist-danger";
-    else if (cm < 30) el.className = "ultra-val dist-warn";
-    else              el.className = "ultra-val dist-safe";
+    el.className = cm < 15 ? "sensor-val dist-danger" : cm < 30 ? "sensor-val dist-warn" : "sensor-val dist-safe";
   }
 }
 
-function send(cmd) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(cmd);
-}
+function send(cmd) { if (ws.readyState === WebSocket.OPEN) ws.send(cmd); }
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
 
-function setStatus(msg) {
-  document.getElementById("status").textContent = msg;
-}
-
-// Houd rijknop ingedrukt → blijf commando sturen
 function press(cmd) {
   if (mode !== "manual") return;
-  if (pressTimer !== null) return;   // voorkom dubbele timer (mouse + touch)
+  if (pressTimer !== null) return;
   send(cmd);
   pressTimer = setInterval(() => send(cmd), 80);
 }
-function pressTouch(cmd, e) {
-  e.preventDefault();                // blokkeert navolgende mousedown
-  press(cmd);
-}
-function sendTouch(cmd, e) {
-  e.preventDefault();                // blokkeert navolgende mousedown
-  send(cmd);
-}
+function pressTouch(cmd, e) { e.preventDefault(); press(cmd); }
+function sendTouch(cmd, e)  { e.preventDefault(); send(cmd); }
 function release() {
-  if (pressTimer !== null) {
-    clearInterval(pressTimer);
-    pressTimer = null;
-  }
+  if (pressTimer !== null) { clearInterval(pressTimer); pressTimer = null; }
   send("stop");
 }
 
 function switchMode() {
+  if (mode === "home") return;
   send(mode === "manual" ? "set_mode:auto" : "set_mode:manual");
+}
+function toggleHome() {
+  send(mode === "home" ? "set_mode:manual" : "set_mode:home");
+}
+function toggleSettings() {
+  settingsOpen = !settingsOpen;
+  document.getElementById("settings-panel").style.display = settingsOpen ? "block" : "none";
 }
 
 function applyMode(newMode) {
   mode = newMode;
-  const badge    = document.getElementById("modebadge");
-  const btn      = document.getElementById("btn-switch");
-  const ctrl     = document.getElementById("controls");
-  const gripper  = document.getElementById("gripper-panel");
-  const autoInfo = document.getElementById("auto-info");
+  const badge     = document.getElementById("modebadge");
+  const btnSwitch = document.getElementById("btn-switch");
+  const btnHome   = document.getElementById("btn-home");
+  const ctrl      = document.getElementById("controls");
+  const gripper   = document.getElementById("gripper-panel");
+  const autoInfo  = document.getElementById("auto-info");
+  const homeInfo  = document.getElementById("home-info");
+
+  ctrl.classList.remove("hidden");
+  gripper.classList.remove("hidden");
+  autoInfo.style.display = "none";
+  homeInfo.style.display = "none";
+  btnSwitch.disabled = false;
+  btnHome.textContent = "\u21B5 Naar 0";
+  btnHome.classList.remove("active");
 
   if (mode === "auto") {
-    badge.textContent = "AUTO";
-    badge.className   = "badge-auto";
-    btn.textContent   = "Stop AUTO";
-    btn.className     = "btn-switch auto";
-    ctrl.classList.add("hidden");
-    gripper.classList.add("hidden");
-    autoInfo.classList.remove("hidden");
+    badge.textContent = "AUTO"; badge.className = "badge-auto";
+    btnSwitch.textContent = "Stop AUTO"; btnSwitch.className = "btn-switch auto";
+    ctrl.classList.add("hidden"); gripper.classList.add("hidden");
+    autoInfo.style.display = "block";
+  } else if (mode === "home") {
+    badge.textContent = "HOME"; badge.className = "badge-home";
+    btnSwitch.textContent = "Start AUTO"; btnSwitch.className = "btn-switch";
+    btnSwitch.disabled = true;
+    btnHome.textContent = "\u23F9 Annuleer"; btnHome.classList.add("active");
+    ctrl.classList.add("hidden"); gripper.classList.add("hidden");
+    homeInfo.style.display = "block";
   } else {
-    badge.textContent = "MANUAL";
-    badge.className   = "badge-manual";
-    btn.textContent   = "Start AUTO";
-    btn.className     = "btn-switch";
-    ctrl.classList.remove("hidden");
-    gripper.classList.remove("hidden");
-    autoInfo.classList.add("hidden");
+    badge.textContent = "MANUAL"; badge.className = "badge-manual";
+    btnSwitch.textContent = "Start AUTO"; btnSwitch.className = "btn-switch";
   }
 }
 
-// ── Pose & mini-kaart ──────────────────────────────────────────────────────
+// ── HOME strategie ────────────────────────────────────────────
+function setStrat(s) {
+  send("set_home_strat:" + s);
+  applyStrat(s);
+}
+function applyStrat(s) {
+  document.getElementById("strat-holonomic").classList.toggle("active", s === "holonomic");
+  document.getElementById("strat-forward").classList.toggle("active",   s === "forward");
+}
 
-// poseOffset: wordt afgetrokken van server-pose zodat "reset" werkt
+// ── Gripper snelheden ─────────────────────────────────────────
+let _gripperSpeedTimer = null;
+function sendGripperSpeeds() {
+  clearTimeout(_gripperSpeedTimer);
+  _gripperSpeedTimer = setTimeout(() => {
+    const j = document.getElementById("sl-jog").value;
+    const a = document.getElementById("sl-auto").value;
+    const h = document.getElementById("sl-home-g").value;
+    send(`set_gripper_speeds:${j},${a},${h}`);
+  }, 200);
+}
+
+// ── Slider helpers ────────────────────────────────────────────
+function sliderVal(sliderId, valId) {
+  document.getElementById(valId).textContent = document.getElementById(sliderId).value;
+}
+function setSlider(sliderId, valId, value) {
+  document.getElementById(sliderId).value = value;
+  document.getElementById(valId).textContent = value;
+}
+
+// ── HSV calibratie ────────────────────────────────────────────
+let _hsvTimer = null;
+function updateHSV() {
+  drawHsvPreview();
+  clearTimeout(_hsvTimer);
+  _hsvTimer = setTimeout(() => {
+    const hl = document.getElementById("sl-hl").value;
+    const sl = document.getElementById("sl-sl").value;
+    const vl = document.getElementById("sl-vl").value;
+    const hh = document.getElementById("sl-hh").value;
+    const sh = document.getElementById("sl-sh").value;
+    const vh = document.getElementById("sl-vh").value;
+    send(`set_hsv:${hl},${sl},${vl},${hh},${sh},${vh}`);
+    const hint = document.getElementById("hsv-save-hint");
+    hint.style.display = "block";
+    setTimeout(() => hint.style.display = "none", 1500);
+  }, 400);
+}
+
+function hsvToRgb(h, s, v) {
+  // h: 0-360, s: 0-1, v: 0-1
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  let r, g, b;
+  if      (h < 60)  { r=c; g=x; b=0; }
+  else if (h < 120) { r=x; g=c; b=0; }
+  else if (h < 180) { r=0; g=c; b=x; }
+  else if (h < 240) { r=0; g=x; b=c; }
+  else if (h < 300) { r=x; g=0; b=c; }
+  else              { r=c; g=0; b=x; }
+  return [(r+m)*255, (g+m)*255, (b+m)*255];
+}
+
+function drawHsvPreview() {
+  const canvas = document.getElementById("hsv-preview");
+  const ctx    = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const hl = parseInt(document.getElementById("sl-hl").value);
+  const hh = parseInt(document.getElementById("sl-hh").value);
+  const sl = parseInt(document.getElementById("sl-sl").value) / 255;
+  const sh = parseInt(document.getElementById("sl-sh").value) / 255;
+  const vl = parseInt(document.getElementById("sl-vl").value) / 255;
+  const vh = parseInt(document.getElementById("sl-vh").value) / 255;
+
+  // Draw gradient across hue range; use mid S and V
+  const smid = (sl + sh) / 2, vmid = (vl + vh) / 2;
+  for (let x = 0; x < W; x++) {
+    const h = hl + (hh - hl) * (x / W);
+    const [r, g, b] = hsvToRgb(h * 2, smid, vmid);  // OpenCV H is 0-180 → multiply by 2 for 0-360
+    ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+    ctx.fillRect(x, 0, 1, H);
+  }
+}
+
+// ── Pose & mini-kaart ──────────────────────────────────────────
 let poseOffset = { x: 0, y: 0, th: 0 };
 let currentRaw = { x: 0, y: 0, th: 0 };
-
-// Pad: array van {x,y} punten in gecorrigeerde coördinaten (m)
 let trail = [];
 const TRAIL_MAX = 2000;
-
-// Kaart schaal & midden
-let mapScale  = 60;   // pixels per meter
-const CANVAS_W = 260;
-const CANVAS_H = 260;
+let mapScale = 60;
 
 const mapCanvas = document.getElementById("map-canvas");
+const CANVAS_W  = mapCanvas.width;
+const CANVAS_H  = mapCanvas.height;
 const mapCtx    = mapCanvas.getContext("2d");
 
 function updatePose(rx, ry, rth) {
@@ -310,124 +543,74 @@ function updatePose(rx, ry, rth) {
   const x  = rx  - poseOffset.x;
   const y  = ry  - poseOffset.y;
   const th = rth - poseOffset.th;
-
-  // Coördinaten-display
-  document.getElementById("pose-x").childNodes[0].textContent = x.toFixed(3);
-  document.getElementById("pose-y").childNodes[0].textContent = y.toFixed(3);
-  document.getElementById("pose-th").childNodes[0].textContent =
-    (th * 180 / Math.PI).toFixed(1);
-
-  // Trail bijhouden
+  document.getElementById("pose-x").textContent  = x.toFixed(2);
+  document.getElementById("pose-y").textContent  = y.toFixed(2);
+  document.getElementById("pose-th").textContent = (th * 180 / Math.PI).toFixed(1);
   trail.push({ x, y });
   if (trail.length > TRAIL_MAX) trail.shift();
-
   drawMap(x, y, th);
 }
 
 function drawMap(x, y, th) {
-  const W = CANVAS_W, H = CANVAS_H;
-  const cx = W / 2, cy = H / 2;
-
+  const W = CANVAS_W, H = CANVAS_H, cx = W/2, cy = H/2;
   mapCtx.clearRect(0, 0, W, H);
 
-  // Raster (1 m rijen)
-  mapCtx.strokeStyle = "#1e2a3a";
-  mapCtx.lineWidth = 1;
+  // Raster
+  mapCtx.strokeStyle = "#161b22"; mapCtx.lineWidth = 1;
   const step = mapScale;
-  // verticaal
-  for (let gx = (cx % step); gx < W; gx += step) {
-    mapCtx.beginPath(); mapCtx.moveTo(gx, 0); mapCtx.lineTo(gx, H); mapCtx.stroke();
-  }
-  // horizontaal
-  for (let gy = (cy % step); gy < H; gy += step) {
-    mapCtx.beginPath(); mapCtx.moveTo(0, gy); mapCtx.lineTo(W, gy); mapCtx.stroke();
-  }
+  for (let gx = cx%step; gx<W; gx+=step) { mapCtx.beginPath(); mapCtx.moveTo(gx,0); mapCtx.lineTo(gx,H); mapCtx.stroke(); }
+  for (let gy = cy%step; gy<H; gy+=step) { mapCtx.beginPath(); mapCtx.moveTo(0,gy); mapCtx.lineTo(W,gy); mapCtx.stroke(); }
 
-  // Assen door nulpunt (gecorrigeerd nulpunt = offset)
-  const ox = cx - x * mapScale;
-  const oy = cy + y * mapScale;
-  mapCtx.strokeStyle = "#223344";
-  mapCtx.lineWidth = 1.5;
-  mapCtx.beginPath(); mapCtx.moveTo(ox, 0); mapCtx.lineTo(ox, H); mapCtx.stroke();
-  mapCtx.beginPath(); mapCtx.moveTo(0, oy); mapCtx.lineTo(W, oy); mapCtx.stroke();
-
-  // Nulpunt-ster
-  mapCtx.fillStyle = "#334";
-  mapCtx.beginPath(); mapCtx.arc(ox, oy, 4, 0, 2 * Math.PI); mapCtx.fill();
+  // Assen
+  const ox = cx - x*mapScale, oy = cy + y*mapScale;
+  mapCtx.strokeStyle = "#1f2d3d"; mapCtx.lineWidth = 1.5;
+  mapCtx.beginPath(); mapCtx.moveTo(ox,0); mapCtx.lineTo(ox,H); mapCtx.stroke();
+  mapCtx.beginPath(); mapCtx.moveTo(0,oy); mapCtx.lineTo(W,oy); mapCtx.stroke();
+  mapCtx.fillStyle = "#388bfd"; mapCtx.beginPath(); mapCtx.arc(ox,oy,4,0,2*Math.PI); mapCtx.fill();
 
   // Trail
   if (trail.length > 1) {
-    mapCtx.beginPath();
-    mapCtx.strokeStyle = "#2563eb";
-    mapCtx.lineWidth = 2;
-    for (let i = 0; i < trail.length; i++) {
-      const px = cx + trail[i].x * mapScale;
-      const py = cy - trail[i].y * mapScale;
-      if (i === 0) mapCtx.moveTo(px, py);
-      else         mapCtx.lineTo(px, py);
+    mapCtx.beginPath(); mapCtx.strokeStyle = "#1f6feb"; mapCtx.lineWidth = 2;
+    for (let i=0; i<trail.length; i++) {
+      const px = cx+trail[i].x*mapScale, py = cy-trail[i].y*mapScale;
+      if (i===0) mapCtx.moveTo(px,py); else mapCtx.lineTo(px,py);
     }
     mapCtx.stroke();
   }
 
-  // Robot positie + heading-pijl
-  const rpx = cx + x * mapScale;
-  const rpy = cy - y * mapScale;
+  // Robot
+  const rpx = cx+x*mapScale, rpy = cy-y*mapScale;
+  mapCtx.fillStyle = "#f85149"; mapCtx.beginPath(); mapCtx.arc(rpx,rpy,9,0,2*Math.PI); mapCtx.fill();
+  const ax = rpx+Math.cos(th)*18, ay = rpy-Math.sin(th)*18;
+  mapCtx.strokeStyle = "#e6edf3"; mapCtx.lineWidth = 2.5;
+  mapCtx.beginPath(); mapCtx.moveTo(rpx,rpy); mapCtx.lineTo(ax,ay); mapCtx.stroke();
 
-  // Robot lichaam (gevulde cirkel)
-  mapCtx.fillStyle = "#e94560";
-  mapCtx.beginPath(); mapCtx.arc(rpx, rpy, 9, 0, 2 * Math.PI); mapCtx.fill();
-
-  // Heading-pijl (in kaart: x=rechts, y=omhoog, theta=0 = rechtdoor = +x-richting op canvas)
-  const arrowLen = 18;
-  const ax = rpx + Math.cos(th) * arrowLen;
-  const ay = rpy - Math.sin(th) * arrowLen;   // canvas y is omgekeerd
-  mapCtx.strokeStyle = "#fff";
-  mapCtx.lineWidth = 2.5;
-  mapCtx.beginPath(); mapCtx.moveTo(rpx, rpy); mapCtx.lineTo(ax, ay); mapCtx.stroke();
-
-  // Schaal-indicator
-  mapCtx.fillStyle = "#556";
-  mapCtx.font = "10px sans-serif";
-  mapCtx.fillText(`${(1000/mapScale).toFixed(0)} cm/div`, 4, H - 4);
+  // Schaal
+  mapCtx.fillStyle = "#484f58"; mapCtx.font = "10px sans-serif";
+  mapCtx.fillText(`${(1000/mapScale).toFixed(0)} cm/div`, 4, H-4);
 }
 
 function resetPose() {
-  poseOffset.x  = currentRaw.x;
-  poseOffset.y  = currentRaw.y;
-  poseOffset.th = currentRaw.th;
-  trail = [];
-  send("pose_reset");   // melding naar server (optioneel, wordt nu genegeerd)
+  poseOffset.x = currentRaw.x; poseOffset.y = currentRaw.y; poseOffset.th = currentRaw.th;
+  trail = []; send("pose_reset");
 }
-
-function mapZoomIn()  { mapScale = Math.min(mapScale * 1.5, 500); drawMap(...lastPose()); }
-function mapZoomOut() { mapScale = Math.max(mapScale / 1.5,   4); drawMap(...lastPose()); }
+function mapZoomIn()  { mapScale = Math.min(mapScale*1.5, 500); drawMap(...lastPose()); }
+function mapZoomOut() { mapScale = Math.max(mapScale/1.5,   4); drawMap(...lastPose()); }
 function lastPose() {
-  const x  = currentRaw.x  - poseOffset.x;
-  const y  = currentRaw.y  - poseOffset.y;
-  const th = currentRaw.th - poseOffset.th;
-  return [x, y, th];
+  return [currentRaw.x-poseOffset.x, currentRaw.y-poseOffset.y, currentRaw.th-poseOffset.th];
 }
 
-// Initieel lege kaart tekenen
 drawMap(0, 0, 0);
+drawHsvPreview();
 
-// ── Toetsenbord rijbesturing (MANUAL) ─────────────────────────────────────
-
-// Toetsenbord rijbesturing (MANUAL)
+// ── Toetsenbord ───────────────────────────────────────────────
 let keys = new Set();
 document.addEventListener("keydown", (e) => {
   if (mode !== "manual" || e.repeat) return;
-  const map = {
-    ArrowUp: "up", ArrowDown: "down",
-    ArrowLeft: "left", ArrowRight: "right",
-    "[": "rot_left", "]": "rot_right"
-  };
+  const map = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right", "[":"rot_left", "]":"rot_right" };
   if (map[e.key]) { keys.add(e.key); flushKeys(); }
 });
-document.addEventListener("keyup", (e) => {
-  keys.delete(e.key);
-  flushKeys();
-});
+document.addEventListener("keyup", (e) => { keys.delete(e.key); flushKeys(); });
 function flushKeys() {
   send("stop");
   if (keys.has("ArrowUp"))    send("up");
