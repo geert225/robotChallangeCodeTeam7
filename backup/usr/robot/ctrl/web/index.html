@@ -211,12 +211,7 @@
       <button class="btn-gripper"
         onmousedown="send('gripper_jog:1')"              onmouseup="send('gripper_stop')"
         ontouchstart="sendTouch('gripper_jog:1',event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
-        &#9650; Gripper JOG+
-      </button>
-      <button class="btn-gripper"
-        onmousedown="send('gripper_jog:-1')"              onmouseup="send('gripper_stop')"
-        ontouchstart="sendTouch('gripper_jog:-1',event)"  ontouchend="send('gripper_stop')" ontouchcancel="send('gripper_stop')">
-        &#9660; Gripper JOG&minus;
+        &#9650; Gripper JOG
       </button>
       <button class="btn-auto-trigger" onclick="send('gripper_auto')">
         &#9654; Gripper AUTO
