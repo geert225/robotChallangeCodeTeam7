@@ -12,7 +12,7 @@
 # Shared Memory:
 #   /dev/shm/robot_cmd      <- mecanum rijcommando's  (4x double)
 #   /dev/shm/gripper_cmd    <- gripper mode+speed     (<id>)
-#   /dev/shm/vision_frame   <- camera frame           (timestamp + RGB)
+#   /dev/shm/vision_frame   <- camera frame           (WIDTH + HEIGHT + timestamp + RGB)
 #   /dev/shm/led_ctrl       <- LED kleuren            (<7B>)
 
 import os
@@ -152,15 +152,15 @@ def led_manual_update(vx, vy, omega):
     avx = abs(vx)
     avy = abs(vy)
     if avx > 0.2 and avy > 0.2:
-        write_led(3, 255, 255,   0,   0, 255,   0)   # vooruit + zijwaarts: geel + groen
+        write_led(2, 255, 255,   0,   0, 255,   0)   # vooruit + zijwaarts: geel + groen
     elif avx > 0.2:
-        write_led(1,   0, 255,   0,   0,   0,   0)   # vooruit/achteruit: groen
+        write_led(0,   0, 255,   0,   0,   0,   0)   # vooruit/achteruit: groen
     elif avy > 0.2:
-        write_led(1, 255, 255,   0,   0, 255,   0)   # zijwaarts: geel + groen
+        write_led(0, 255, 255,   0,   0, 255,   0)   # zijwaarts: geel + groen
     elif abs(omega) > 0.5:
-        write_led(1,   0, 150, 255,   0, 150, 255)   # roteren: blauw
+        write_led(0,   0, 150, 255,   0, 150, 255)   # roteren: blauw
     else:
-        write_led(2,   0, 255, 255,   0,   0,   0)   # idle: cyaan
+        write_led(1,   0, 255, 255,   0,   0,   0)   # idle: cyaan
 
 # AUTO — paars: zoekend knippert, gevonden solide
 _led_blink_state = False
@@ -169,14 +169,10 @@ def led_auto_update(has_target: bool):
     global _led_blink_state
     if has_target:
         # solide paars
-        write_led(1, 160, 0, 200, 160, 0, 200)
+        write_led(0, 160, 0, 200, 160, 0, 200)
     else:
         # knipperend paars — toggle elke aanroep (vision_loop ~20ms, update elke ~500ms via teller)
-        if _led_blink_state:
-            write_led(1, 160, 0, 200, 160, 0, 200)
-        else:
-            write_led(1,   0, 0,   0,   0, 0,   0)   # uit
-        _led_blink_state = not _led_blink_state
+        write_led(1, 160, 0, 200, 160, 0, 200)
 
 # ============================================================
 # SHARED MEMORY — ULTRASOON
@@ -256,13 +252,21 @@ _HOME_MAX_SPD_REPULSE = 1.1   # iets boven _HOME_MAX_SPD zodat afstoting ruimte 
 
 # ============================================================
 # SHARED MEMORY — VISION FRAME
+# Layout: [WIDTH:H][HEIGHT:H] [timestamp:d] [frame:RGB...]
+# WIDTH en HEIGHT worden dynamisch gelezen uit de SHM header (geschreven door camera.py)
 # ============================================================
-WIDTH, HEIGHT, CHANNELS = 320, 240, 3
-FRAME_SIZE         = WIDTH * HEIGHT * CHANNELS
-VISION_FRAME_TOTAL = 8 + FRAME_SIZE
-VISION_FRAME_PATH  = "/dev/shm/vision_frame"
+VISION_META_FMT  = 'HH'
+VISION_META_SIZE = struct.calcsize(VISION_META_FMT)   # 4 bytes: WIDTH, HEIGHT
+CHANNELS         = 3
+VISION_FRAME_PATH = "/dev/shm/vision_frame"
 
-vision_shm, vision_fh = _create_or_open_shm(VISION_FRAME_PATH, VISION_FRAME_TOTAL)
+# Open vision frame SHM — camera.py schrijft de dimensies in het header
+if not os.path.exists(VISION_FRAME_PATH):
+    _default_frame_size = 320 * 240 * CHANNELS
+    with open(VISION_FRAME_PATH, "wb") as f:
+        f.write(b"\x00" * (VISION_META_SIZE + 8 + _default_frame_size))
+vision_fh  = open(VISION_FRAME_PATH, "r+b")
+vision_shm = mmap.mmap(vision_fh.fileno(), 0)   # 0 = map hele file
 
 latest_jpeg = None
 
@@ -353,13 +357,14 @@ async def vision_loop():
         fcntl.flock(vision_fh.fileno(), fcntl.LOCK_SH)
         try:
             vision_shm.seek(0)
+            frame_w, frame_h = struct.unpack(VISION_META_FMT, vision_shm.read(VISION_META_SIZE))
             vision_shm.read(8)                     # timestamp (overgeslagen)
-            frame_bytes = vision_shm.read(FRAME_SIZE)
+            frame_bytes = vision_shm.read(frame_w * frame_h * CHANNELS)
         finally:
             fcntl.flock(vision_fh.fileno(), fcntl.LOCK_UN)
 
-        frame     = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, CHANNELS))
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame     = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((frame_h, frame_w, CHANNELS))
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # camera geeft RGB, omzetten naar BGR voor CV
 
         # bekerdetectie
         hsv  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -376,7 +381,7 @@ async def vision_loop():
                 cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
         # obstakeldetectie (onderste helft)
-        roi   = frame_bgr[int(HEIGHT * 0.55):HEIGHT, :]
+        roi   = frame_bgr[int(frame_h * 0.55):frame_h, :]
         gray  = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 120)
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
@@ -388,11 +393,11 @@ async def vision_loop():
             if ow < 12 or oh < 6:
                 continue
             cv2.rectangle(roi, (ox, oy), (ox+ow, oy+oh), (0, 0, 255), 2)
-        frame_bgr[int(HEIGHT * 0.55):HEIGHT, :] = roi
+        frame_bgr[int(frame_h * 0.55):frame_h, :] = roi
 
         # rijcommando + LED afhankelijk van modus
         if robot_mode == MODE_AUTO:
-            vx, vy, omega = _compute_velocity(bekers, WIDTH)
+            vx, vy, omega = _compute_velocity(bekers, frame_w)
             vx, vy, omega = _apply_avoidance(vx, vy, omega)
             write_drive_cmd(vx, vy, omega)
 
@@ -410,7 +415,7 @@ async def vision_loop():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
         # JPEG bouwen
-        img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        img = Image.fromarray(frame_bgr)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=70)
         latest_jpeg = buf.getvalue()
@@ -529,7 +534,7 @@ async def handle_control_ws(reader, writer, request):
                 drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
                 _blink_counter = 0
                 write_drive_cmd(0.0, 0.0, 0.0)
-                write_led(1, 0, 100, 255, 0, 100, 255)   # solide blauw tijdens HOME
+                write_led(0, 0, 100, 255, 0, 100, 255)   # solide blauw tijdens HOME
                 print("[brain] → HOME")
                 await _ws_send_text(writer, "mode:home")
 

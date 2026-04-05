@@ -15,7 +15,9 @@ WIDTH = 320
 HEIGHT = 240
 CHANNELS = 3
 FRAME_SIZE = WIDTH * HEIGHT * CHANNELS
-TOTAL_SIZE = 8 + FRAME_SIZE  # timestamp + frame
+VISION_META_FMT  = 'HH'                              # WIDTH, HEIGHT als 2x uint16
+VISION_META_SIZE = struct.calcsize(VISION_META_FMT)  # 4 bytes
+TOTAL_SIZE = VISION_META_SIZE + 8 + FRAME_SIZE       # meta + timestamp + frame
 SHM_PATH = "/dev/shm/vision_frame"
 
 
@@ -58,6 +60,9 @@ while True:
 
     try:
         mm.seek(0)
+
+        # dimensies (WIDTH, HEIGHT)
+        mm.write(struct.pack(VISION_META_FMT, WIDTH, HEIGHT))
 
         # timestamp
         mm.write(struct.pack('d', time.time()))

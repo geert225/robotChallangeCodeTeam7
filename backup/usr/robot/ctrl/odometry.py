@@ -25,8 +25,8 @@ import os, mmap, struct, time, math
 # =============================================================================
 # ROBOT PARAMETERS  (zelfde als mecanum.py)
 # =============================================================================
-ENC_PPR = 540        # encoder pulsen per wiel-omwenteling
-R       = 0.08       # wielstraal [m]
+ENC_PPR = 1080        # encoder pulsen per wiel-omwenteling
+R       = 0.04       # wielstraal [m]
 L       = 0.190      # halve wielafstand voor-achter [m]
 W       = 0.210      # halve wielafstand links-rechts [m]
 LW      = L + W      # = 0.400 m
@@ -42,8 +42,8 @@ ENCODER_SIGNS = [-1, 1, -1, 1]
 # Slip-compensatie op encoder-pad (gaat mee in gewogen fusie):
 #   stel in op SLIP_VX = werkelijke_afstand / encoder_afstand  (< 1.0 bij slip)
 # Meting: rij 1 m vooruit, kijk wat de kaart toont, pas dienovereenkomstig aan.
-SLIP_VX = 0.267  # gemeten: robot reed 0.48 m, kaart toonde 1.80 m → 0.48/1.80
-SLIP_VY = 0.213  # gemeten: robot reed 0.20 m, kaart toonde 0.94 m → 0.20/0.94
+SLIP_VX = 1  # gemeten: robot reed 0.48 m, kaart toonde 1.80 m → 0.48/1.80
+SLIP_VY = 0.8  # gemeten: robot reed 0.20 m, kaart toonde 0.94 m → 0.20/0.94
 
 # ── Complementary filter: encoder vs accel ────────────────────────────────
 # ACCEL_TRUST = gewicht van de accel-snelheid in de fusie (0.0 .. 1.0)

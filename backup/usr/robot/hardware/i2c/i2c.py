@@ -201,7 +201,10 @@ led_state = False
 while True:
     now = time.time()
     dt = now - last_time
-    last_time = now
+
+    if dt > 0.1:
+        first_run = True
+        last_time = now
 
     # ------------------------
     # PWM (change detect)

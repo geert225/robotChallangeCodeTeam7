@@ -43,7 +43,7 @@ class AddonBoard:
         """
         RGB: 0 - 255
         """
-        r1 = max(0, min(3, int(r1)))
+        m = max(0, min(3, int(m)))
         r1 = max(0, min(255, int(r1)))
         g1 = max(0, min(255, int(g1)))
         b1 = max(0, min(255, int(b1)))
