@@ -715,7 +715,7 @@ async def pose_loop():
 # toe aan de kaart. Draait in ALLE modi zodat de kaart tijdens de
 # verkenning (MANUAL / AUTO) al wordt opgebouwd.
 # ============================================================
-_ULTRA_RECORD_MAX_CM = 150   # cm — metingen verder dan dit worden niet opgeslagen
+_ULTRA_TRIGGER_CM = 30   # cm — log obstakel als sensor < deze waarde meet
 
 async def obstacle_map_loop():
     """Vult de obstacle_map met sensordata (5 Hz)."""
@@ -724,13 +724,11 @@ async def obstacle_map_loop():
     while True:
         px, py, pth = _read_pose()
 
-        # Neem de kortste geldige meting als schatter voor het dichtsbijzijnde obstakel
-        # (beide sensoren zitten aan de voorzijde)
-        candidates = [d for d in (_ultra_d1, _ultra_d2)
-                      if 0 < d <= _ULTRA_RECORD_MAX_CM]
-        if candidates:
-            d_front = min(candidates)
-            obstacle_map.add_reading(px, py, pth, d_front)
+        # beide sensoren zitten aan de voorzijde
+        if 0 < _ultra_d1 <= _ULTRA_TRIGGER_CM:
+            obstacle_map.add_reading(px, py, pth, _ultra_d1, direction_offset=0.0)
+        if 0 < _ultra_d2 <= _ULTRA_TRIGGER_CM:
+            obstacle_map.add_reading(px, py, pth, _ultra_d2, direction_offset=0.0)
 
         # Stuur obstakelkaart elke ~2 seconden naar clients (10 ticks × 0.2 s)
         _broadcast_counter += 1

@@ -28,8 +28,8 @@ from typing import List, Tuple
 # ─── Opname-parameters ───────────────────────────────────────────────────────
 MAX_OBSTACLES     = 120    # maximaal aantal opgeslagen obstakels (FIFO bij overschrijding)
 MERGE_RADIUS      = 0.20   # m — nieuwe meting binnen deze straal → samenvoegen
-MAX_RECORD_DIST_M = 1.50   # m — meetwaarden verder dan dit worden genegeerd (muur ver weg)
-MIN_RECORD_DIST_M = 0.50   # m — sensor betrouwbaar vanaf ~50 cm
+MAX_RECORD_DIST_M = 0.30   # m — alleen opslaan als sensor < 30 cm meet (dichtbij obstakel)
+MIN_RECORD_DIST_M = 0.05   # m — minimale afstand (ruis/zelf-detectie filter)
 HOME_EXCLUSION_R  = 0.30   # m — obstakels in deze straal rondom thuis (0,0) worden NIET opgeslagen
                            #     (voorkomt dat de home-zone als obstakel wordt vastgelegd)
 
@@ -66,29 +66,32 @@ class ObstacleMap:
 
     # ─── Opname ──────────────────────────────────────────────────────────────
     def add_reading(self, px: float, py: float, theta: float,
-                    d_front_cm: int) -> None:
+                    d_cm: int, direction_offset: float = 0.0) -> None:
         """
         Voegt een ultrasoon-meting toe aan de kaart.
 
         Parameters
         ----------
-        px, py   : huidige robotpositie in het wereldframe [m]
-        theta    : huidige robotkop [rad]
-        d_front_cm : gemeten afstand voorwaarts [cm].  0 = geen geldig signaal.
+        px, py           : huidige robotpositie in het wereldframe [m]
+        theta            : huidige robotkop [rad]
+        d_cm             : gemeten afstand [cm].  0 = geen geldig signaal.
+        direction_offset : hoekoffset t.o.v. theta [rad].
+                           0.0  = voorsensor (rijrichting),
+                           math.pi = achtersensor.
         """
-        if d_front_cm <= 0:
+        if d_cm <= 0:
             return
 
-        d_m = d_front_cm / 100.0
+        d_m = d_cm / 100.0
 
         # Buiten opname-venster → negeren
         if not (MIN_RECORD_DIST_M <= d_m <= MAX_RECORD_DIST_M):
             return
 
         # Berekening obstakelposition in wereldframe
-        # Voorwaartse richting robot = (cos theta, sin theta)
-        ox = px + d_m * math.cos(theta)
-        oy = py + d_m * math.sin(theta)
+        angle = theta + direction_offset
+        ox = px + d_m * math.cos(angle)
+        oy = py + d_m * math.sin(angle)
 
         # Sla geen obstakels op in de home-zone (rondom oorsprong)
         if math.sqrt(ox * ox + oy * oy) < HOME_EXCLUSION_R:
