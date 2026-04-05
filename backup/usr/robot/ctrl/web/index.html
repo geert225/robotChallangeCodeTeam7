@@ -62,9 +62,12 @@
   #home-dist { font-weight: bold; }
 
   /* ── Main layout ─────────────────────────────────────────────── */
-  #main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-  #left-col  { flex: 0 0 auto; }
-  #right-col { flex: 1 1 260px; min-width: 0; }
+  #main { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #left-col  { flex: 0 0 270px; min-width: 240px; overflow-y: auto;
+               max-height: calc(100vh - 90px); }
+  #right-col { flex: 1 1 400px; min-width: 0;
+               display: flex; flex-direction: row;
+               gap: 8px; align-items: flex-start; }
 
   /* ── Drive ───────────────────────────────────────────────────── */
   #controls { margin-bottom: 10px; }
@@ -91,23 +94,51 @@
   #pose-card .sensor-val { font-size: 1.1em; color: #58a6ff; }
 
   /* ── Map ─────────────────────────────────────────────────────── */
-  #map-wrap { margin-bottom: 8px; }
+  #map-wrap { flex: 1 1 0; min-width: 0; }
   #map-canvas { border: 1px solid #30363d; border-radius: 8px; display: block;
-    background: #0a0e14; cursor: crosshair; width: 100%; max-width: 320px; }
+    background: #0a0e14; cursor: crosshair; width: 100%; }
   #map-btns { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 
   /* ── Camera ──────────────────────────────────────────────────── */
-  #cam { display: block; border: 1px solid #30363d; border-radius: 8px;
-         width: 100%; max-width: 320px; }
+  #cam-canvas { display: block; border: 1px solid #30363d; border-radius: 8px;
+                width: auto; max-width: 100%; cursor: crosshair; }
+  #cam-canvas:hover { border-color: #388bfd; }
+  #cam-wrap { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  #vision-step-row { display: flex; align-items: center; gap: 7px; }
+  #vision-step-row label { font-size: 0.75em; color: #8b949e; white-space: nowrap; }
+  #vision-step { background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+                 border-radius: 6px; padding: 4px 8px; font-size: 0.82em; cursor: pointer;
+                 flex: 1; }
+
+  /* ── Color sample list ───────────────────────────────────────── */
+  #sample-area { width: 100%; }
+  #sample-bar { display: flex; align-items: center; justify-content: space-between;
+                margin-top: 5px; }
+  #sample-bar span { font-size: 0.72em; color: #484f58; }
+  #sample-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; min-height: 10px; }
+  .sample-swatch { display: flex; align-items: center; gap: 4px; background: #21262d;
+                   border: 1px solid #30363d; border-radius: 5px; padding: 3px 7px; }
+  .sample-dot  { width: 16px; height: 16px; border-radius: 3px; border: 1px solid #484f58;
+                 flex-shrink: 0; }
+  .sample-hex  { font-size: 0.7em; color: #8b949e; font-family: monospace; }
+  .sample-del  { cursor: pointer; color: #f85149; font-size: 1em; background: none;
+                 border: none; padding: 0 0 0 3px; line-height: 1; }
 
   /* ── Settings panel ──────────────────────────────────────────── */
   #settings-panel {
     background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-    padding: 12px; margin-top: 12px; display: none;
+    padding: 10px; margin-top: 10px; width: 100%;
   }
-  #settings-panel h3 { margin: 0 0 12px; font-size: 0.95em; color: #c9d1d9; }
+  #settings-panel h3 { margin: 0 0 10px; font-size: 0.9em; color: #c9d1d9; }
   .settings-section { margin-bottom: 14px; }
   .settings-section > .section-label { margin-bottom: 6px; display: block; }
+
+  /* Color pickers */
+  .color-picker-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .color-picker-row label { font-size: 0.82em; color: #8b949e; width: 72px; flex-shrink: 0; }
+  .color-picker-row .cp-hint { font-size: 0.72em; color: #484f58; }
+  input[type=color] { width: 54px; height: 34px; border: 1px solid #30363d;
+                      border-radius: 6px; background: none; cursor: pointer; padding: 2px; }
 
   /* Home strategie toggle */
   .strat-btns { display: flex; gap: 6px; }
@@ -117,7 +148,7 @@
 
   /* Sliders */
   .slider-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-  .slider-row label { width: 120px; font-size: 0.82em; color: #8b949e; flex-shrink: 0; }
+  .slider-row label { width: 80px; font-size: 0.82em; color: #8b949e; flex-shrink: 0; }
   .slider-row input[type=range] { flex: 1; accent-color: #388bfd; }
   .slider-row .val { width: 36px; text-align: right; font-size: 0.85em;
                      color: #58a6ff; font-weight: bold; }
@@ -139,7 +170,6 @@
   <div id="header-btns">
     <button id="btn-switch" class="btn-switch" onclick="switchMode()">Start AUTO</button>
     <button id="btn-home"   class="btn-home"   onclick="toggleHome()">&#8617; Naar 0</button>
-    <button class="btn-settings" onclick="toggleSettings()">&#9881; Instellingen</button>
   </div>
 </div>
 
@@ -217,11 +247,89 @@
         &#9654; Gripper AUTO
       </button>
     </div>
+
+    <!-- ── Instellingen (altijd zichtbaar, in linker kolom) ──────── -->
+    <div id="settings-panel">
+      <h3>&#9881; Instellingen</h3>
+
+      <div class="settings-section">
+        <span class="section-label">HOME navigatiestrategie</span>
+        <div class="strat-btns">
+          <button class="strat-btn active" id="strat-holonomic" onclick="setStrat('holonomic')">
+            &#8859; Holonomic
+          </button>
+          <button class="strat-btn" id="strat-forward" onclick="setStrat('forward')">
+            &#8593; Forward-only
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <span class="section-label">Gripper snelheden (0–100)</span>
+        <div class="slider-row">
+          <label>Jog</label>
+          <input type="range" min="0" max="100" value="30" id="sl-jog"
+                 oninput="sliderVal('sl-jog','sv-jog'); sendGripperSpeeds()">
+          <span class="val" id="sv-jog">30</span>
+        </div>
+        <div class="slider-row">
+          <label>Auto</label>
+          <input type="range" min="0" max="100" value="60" id="sl-auto"
+                 oninput="sliderVal('sl-auto','sv-auto'); sendGripperSpeeds()">
+          <span class="val" id="sv-auto">60</span>
+        </div>
+        <div class="slider-row">
+          <label>Home</label>
+          <input type="range" min="0" max="100" value="20" id="sl-home-g"
+                 oninput="sliderVal('sl-home-g','sv-home-g'); sendGripperSpeeds()">
+          <span class="val" id="sv-home-g">20</span>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <span class="section-label">Blob detectie kleur (auto-opgeslagen)</span>
+        <div class="color-picker-row">
+          <label>Kleur min</label>
+          <input type="color" id="cp-lower" value="#000000" oninput="colorPickerChanged()">
+          <span class="cp-hint">donker / min</span>
+        </div>
+        <div class="color-picker-row">
+          <label>Kleur max</label>
+          <input type="color" id="cp-upper" value="#ffffff" oninput="colorPickerChanged()">
+          <span class="cp-hint">helder / max</span>
+        </div>
+        <div class="hidden">
+          <input type="range" id="sl-hl" min="0" max="180" value="130">
+          <input type="range" id="sl-sl" min="0" max="255" value="140">
+          <input type="range" id="sl-vl" min="0" max="255" value="90">
+          <input type="range" id="sl-hh" min="0" max="180" value="150">
+          <input type="range" id="sl-sh" min="0" max="255" value="255">
+          <input type="range" id="sl-vh" min="0" max="255" value="220">
+          <span id="sv-hl"></span><span id="sv-sl"></span><span id="sv-vl"></span>
+          <span id="sv-hh"></span><span id="sv-sh"></span><span id="sv-vh"></span>
+        </div>
+        <div class="slider-row" style="margin-top:8px;">
+          <label>Marge tint</label>
+          <input type="range" min="0" max="30" value="10" id="sl-margin-h"
+                 oninput="sliderVal('sl-margin-h','sv-margin-h'); recalculateHSV()">
+          <span class="val" id="sv-margin-h">10</span>
+        </div>
+        <div class="slider-row">
+          <label>Marge S/V</label>
+          <input type="range" min="0" max="100" value="40" id="sl-margin-sv"
+                 oninput="sliderVal('sl-margin-sv','sv-margin-sv'); recalculateHSV()">
+          <span class="val" id="sv-margin-sv">40</span>
+        </div>
+        <canvas id="hsv-preview" width="240" height="24"></canvas>
+        <div id="hsv-save-hint">&#10003; Opgeslagen</div>
+      </div>
+    </div>
   </div>
 
+  <!-- ── Rechter kolom: kaart + camera (groter) ─────────────────── -->
   <div id="right-col">
     <div id="map-wrap">
-      <canvas id="map-canvas" width="320" height="260"></canvas>
+      <canvas id="map-canvas" width="520" height="520"></canvas>
       <div id="map-btns">
         <button class="btn-small" onclick="resetPose()">Reset nulpunt</button>
         <button class="btn-small" onclick="mapZoomIn()">&#43;</button>
@@ -232,91 +340,26 @@
         Obstakels: <span id="obs-n">0</span>
       </div>
     </div>
-    <img id="cam" alt="camera">
-  </div>
-</div>
-
-<!-- ── Settings panel ──────────────────────────────────────────── -->
-<div id="settings-panel">
-  <h3>&#9881; Instellingen</h3>
-
-  <!-- HOME strategie -->
-  <div class="settings-section">
-    <span class="section-label">HOME navigatiestrategie</span>
-    <div class="strat-btns">
-      <button class="strat-btn active" id="strat-holonomic" onclick="setStrat('holonomic')">
-        &#8859; Holonomic (alle richtingen)
-      </button>
-      <button class="strat-btn" id="strat-forward" onclick="setStrat('forward')">
-        &#8593; Forward-only (draaien &rarr; rijden)
-      </button>
+    <div id="cam-wrap">
+      <div id="vision-step-row">
+        <label for="vision-step">&#128247; Stap:</label>
+        <select id="vision-step" onchange="setVisionStep(this.value)">
+          <option value="raw">Raw (origineel)</option>
+          <option value="hsv">HSV kleurruimte</option>
+          <option value="mask">Masker (HSV filter)</option>
+          <option value="bekers">Bekerdetectie</option>
+          <option value="final" selected>Finaal (alles)</option>
+        </select>
+      </div>
+      <canvas id="cam-canvas" width="320" height="240" title="Klik om kleur te samplen"></canvas>
+      <div id="sample-area">
+        <div id="sample-bar">
+          <span>&#128681; Klik op beeld om kleur te samplen</span>
+          <button class="btn-small" onclick="clearColorSamples()">Wis alles</button>
+        </div>
+        <div id="sample-list"></div>
+      </div>
     </div>
-  </div>
-
-  <!-- Gripper snelheden -->
-  <div class="settings-section">
-    <span class="section-label">Gripper snelheden (0–100)</span>
-    <div class="slider-row">
-      <label>Jog snelheid</label>
-      <input type="range" min="0" max="100" value="30" id="sl-jog"
-             oninput="sliderVal('sl-jog','sv-jog'); sendGripperSpeeds()">
-      <span class="val" id="sv-jog">30</span>
-    </div>
-    <div class="slider-row">
-      <label>Auto full speed</label>
-      <input type="range" min="0" max="100" value="60" id="sl-auto"
-             oninput="sliderVal('sl-auto','sv-auto'); sendGripperSpeeds()">
-      <span class="val" id="sv-auto">60</span>
-    </div>
-    <div class="slider-row">
-      <label>Home vasthoudsnelheid</label>
-      <input type="range" min="0" max="100" value="20" id="sl-home-g"
-             oninput="sliderVal('sl-home-g','sv-home-g'); sendGripperSpeeds()">
-      <span class="val" id="sv-home-g">20</span>
-    </div>
-  </div>
-
-  <!-- HSV calibratie -->
-  <div class="settings-section">
-    <span class="section-label">Blob detectie HSV-bereik (auto-opgeslagen)</span>
-    <div class="slider-row">
-      <label>H min (0–180)</label>
-      <input type="range" min="0" max="180" value="130" id="sl-hl"
-             oninput="sliderVal('sl-hl','sv-hl'); updateHSV()">
-      <span class="val" id="sv-hl">130</span>
-    </div>
-    <div class="slider-row">
-      <label>S min (0–255)</label>
-      <input type="range" min="0" max="255" value="140" id="sl-sl"
-             oninput="sliderVal('sl-sl','sv-sl'); updateHSV()">
-      <span class="val" id="sv-sl">140</span>
-    </div>
-    <div class="slider-row">
-      <label>V min (0–255)</label>
-      <input type="range" min="0" max="255" value="90" id="sl-vl"
-             oninput="sliderVal('sl-vl','sv-vl'); updateHSV()">
-      <span class="val" id="sv-vl">90</span>
-    </div>
-    <div class="slider-row">
-      <label>H max (0–180)</label>
-      <input type="range" min="0" max="180" value="150" id="sl-hh"
-             oninput="sliderVal('sl-hh','sv-hh'); updateHSV()">
-      <span class="val" id="sv-hh">150</span>
-    </div>
-    <div class="slider-row">
-      <label>S max (0–255)</label>
-      <input type="range" min="0" max="255" value="255" id="sl-sh"
-             oninput="sliderVal('sl-sh','sv-sh'); updateHSV()">
-      <span class="val" id="sv-sh">255</span>
-    </div>
-    <div class="slider-row">
-      <label>V max (0–255)</label>
-      <input type="range" min="0" max="255" value="220" id="sl-vh"
-             oninput="sliderVal('sl-vh','sv-vh'); updateHSV()">
-      <span class="val" id="sv-vh">220</span>
-    </div>
-    <canvas id="hsv-preview" width="320" height="28"></canvas>
-    <div id="hsv-save-hint">&#10003; Opgeslagen</div>
   </div>
 </div>
 
@@ -325,13 +368,86 @@ let ws       = new WebSocket("ws://" + location.host + "/ws");
 let camWs    = new WebSocket("ws://" + location.host + "/cam");
 let mode     = "manual";
 let pressTimer = null;
-let settingsOpen = false;
 
 camWs.binaryType = "blob";
 camWs.onmessage  = (e) => {
-  let url = URL.createObjectURL(e.data);
-  document.getElementById("cam").src = url;
+  const url = URL.createObjectURL(e.data);
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.getElementById("cam-canvas");
+    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+      canvas.width  = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
 };
+
+// ── Camera color sampler ───────────────────────────────────────
+let colorSamples = [];
+
+document.getElementById("cam-canvas").addEventListener("click", (e) => {
+  const canvas = document.getElementById("cam-canvas");
+  const rect   = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) * (canvas.width  / rect.width));
+  const y = Math.floor((e.clientY - rect.top)  * (canvas.height / rect.height));
+  const px = canvas.getContext("2d").getImageData(x, y, 1, 1).data;
+  addColorSample(px[0], px[1], px[2]);
+});
+
+function addColorSample(r, g, b) {
+  colorSamples.push({ r, g, b });
+  renderSampleList();
+  recalculateHSV();
+}
+
+function removeColorSample(i) {
+  colorSamples.splice(i, 1);
+  renderSampleList();
+  recalculateHSV();
+}
+
+function clearColorSamples() {
+  colorSamples = [];
+  renderSampleList();
+}
+
+function renderSampleList() {
+  const list = document.getElementById("sample-list");
+  list.innerHTML = "";
+  colorSamples.forEach(({ r, g, b }, i) => {
+    const hex = "#" + [r,g,b].map(x => x.toString(16).padStart(2,"0")).join("");
+    const swatch = document.createElement("div");
+    swatch.className = "sample-swatch";
+    swatch.innerHTML =
+      `<div class="sample-dot" style="background:${hex}"></div>` +
+      `<span class="sample-hex">${hex}</span>` +
+      `<button class="sample-del" onclick="removeColorSample(${i})" title="Verwijder">&#10005;</button>`;
+    list.appendChild(swatch);
+  });
+}
+
+function recalculateHSV() {
+  if (colorSamples.length === 0) return;
+  const hsvs = colorSamples.map(({ r, g, b }) => rgbToHsv(r, g, b));
+  const mh  = parseInt(document.getElementById("sl-margin-h").value);
+  const msv = parseInt(document.getElementById("sl-margin-sv").value);
+  const hl = Math.max(0,   Math.min(...hsvs.map(h => h[0])) - mh);
+  const hh = Math.min(180, Math.max(...hsvs.map(h => h[0])) + mh);
+  const sl = Math.max(0,   Math.min(...hsvs.map(h => h[1])) - msv);
+  const sh = Math.min(255, Math.max(...hsvs.map(h => h[1])) + msv);
+  const vl = Math.max(0,   Math.min(...hsvs.map(h => h[2])) - msv);
+  const vh = Math.min(255, Math.max(...hsvs.map(h => h[2])) + msv);
+  // Verborgen sliders bijwerken
+  document.getElementById("sl-hl").value = hl; document.getElementById("sl-sl").value = sl; document.getElementById("sl-vl").value = vl;
+  document.getElementById("sl-hh").value = hh; document.getElementById("sl-sh").value = sh; document.getElementById("sl-vh").value = vh;
+  // Color pickers bijwerken
+  document.getElementById("cp-lower").value = hsvToHex(hl, sl, vl);
+  document.getElementById("cp-upper").value = hsvToHex(hh, sh, vh);
+  updateHSV();
+}
 
 ws.onopen    = () => setStatus("Verbonden");
 ws.onclose   = () => setStatus("Verbinding verbroken");
@@ -362,9 +478,13 @@ ws.onmessage = (e) => {
     setSlider("sl-home-g", "sv-home-g", p[2]);
   } else if (d.startsWith("hsv:")) {
     const v = d.slice(4).split(",").map(Number);
-    setSlider("sl-hl","sv-hl", v[0]); setSlider("sl-sl","sv-sl", v[1]); setSlider("sl-vl","sv-vl", v[2]);
-    setSlider("sl-hh","sv-hh", v[3]); setSlider("sl-sh","sv-sh", v[4]); setSlider("sl-vh","sv-vh", v[5]);
+    document.getElementById("sl-hl").value = v[0]; document.getElementById("sl-sl").value = v[1]; document.getElementById("sl-vl").value = v[2];
+    document.getElementById("sl-hh").value = v[3]; document.getElementById("sl-sh").value = v[4]; document.getElementById("sl-vh").value = v[5];
+    document.getElementById("cp-lower").value = hsvToHex(v[0], v[1], v[2]);
+    document.getElementById("cp-upper").value = hsvToHex(v[3], v[4], v[5]);
     drawHsvPreview();
+  } else if (d.startsWith("vision_step:")) {
+    document.getElementById("vision-step").value = d.slice(12);
   } else if (d.startsWith("obstacles:")) {
     const parts = d.split(":");
     const n = parseInt(parts[1]);
@@ -392,6 +512,7 @@ function updateUltra(id, cm) {
 }
 
 function send(cmd) { if (ws.readyState === WebSocket.OPEN) ws.send(cmd); }
+function setVisionStep(step) { send("set_vision_step:" + step); }
 function setStatus(msg) { document.getElementById("status").textContent = msg; }
 
 function press(cmd) {
@@ -413,10 +534,6 @@ function switchMode() {
 }
 function toggleHome() {
   send(mode === "home" ? "set_mode:manual" : "set_mode:home");
-}
-function toggleSettings() {
-  settingsOpen = !settingsOpen;
-  document.getElementById("settings-panel").style.display = settingsOpen ? "block" : "none";
 }
 
 function applyMode(newMode) {
@@ -484,6 +601,36 @@ function sliderVal(sliderId, valId) {
 function setSlider(sliderId, valId, value) {
   document.getElementById(sliderId).value = value;
   document.getElementById(valId).textContent = value;
+}
+
+// ── Kleurconversie helpers ─────────────────────────────────────
+function hexToRgb(hex) {
+  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
+}
+function rgbToHsv(r, g, b) {
+  // Geeft [h (0–180 OpenCV), s (0–255), v (0–255)]
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b), d = max - min;
+  const v = max, s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d > 0) {
+    if      (max === r) h = ((g-b)/d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b-r)/d + 2) / 6;
+    else                h = ((r-g)/d + 4) / 6;
+  }
+  return [Math.round(h * 180), Math.round(s * 255), Math.round(v * 255)];
+}
+function hsvToHex(h, s, v) {
+  // h: 0–180 (OpenCV), s/v: 0–255 → #rrggbb
+  const [r,g,b] = hsvToRgb(h * 2, s / 255, v / 255);
+  return '#' + [r,g,b].map(x => Math.round(x).toString(16).padStart(2,'0')).join('');
+}
+function colorPickerChanged() {
+  const [hl,sl,vl] = rgbToHsv(...hexToRgb(document.getElementById("cp-lower").value));
+  const [hh,sh,vh] = rgbToHsv(...hexToRgb(document.getElementById("cp-upper").value));
+  document.getElementById("sl-hl").value = hl; document.getElementById("sl-sl").value = sl; document.getElementById("sl-vl").value = vl;
+  document.getElementById("sl-hh").value = hh; document.getElementById("sl-sh").value = sh; document.getElementById("sl-vh").value = vh;
+  updateHSV();
 }
 
 // ── HSV calibratie ────────────────────────────────────────────

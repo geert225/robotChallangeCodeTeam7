@@ -270,6 +270,10 @@ vision_shm = mmap.mmap(vision_fh.fileno(), 0)   # 0 = map hele file
 
 latest_jpeg = None
 
+# Selecteerbare vision debug-stap (instelbaar via WebSocket vanuit HTML)
+# Opties: "raw" | "hsv" | "mask" | "bekers" | "final"
+_vision_debug_step = "final"
+
 # Verbonden control-websocket clients (voor broadcast van ultrasoon-data)
 _control_clients: set = set()
 
@@ -366,6 +370,8 @@ async def vision_loop():
         frame     = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((frame_h, frame_w, CHANNELS))
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # camera geeft RGB, omzetten naar BGR voor CV
 
+        raw_bgr = frame_bgr.copy()   # stap "raw": origineel frame voor debug
+
         # bekerdetectie
         hsv  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
@@ -380,20 +386,22 @@ async def vision_loop():
                 bekers.append((x, y, w, h, area))
                 cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
+        cups_bgr = frame_bgr.copy()  # stap "bekers": na cup-boxes, vóór obstakeldetectie
+
         # obstakeldetectie (onderste helft)
-        roi   = frame_bgr[int(frame_h * 0.55):frame_h, :]
-        gray  = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 120)
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        cnt_obs, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for c in cnt_obs:
-            if cv2.contourArea(c) < MIN_OBST_AREA:
-                continue
-            ox, oy, ow, oh = cv2.boundingRect(c)
-            if ow < 12 or oh < 6:
-                continue
-            cv2.rectangle(roi, (ox, oy), (ox+ow, oy+oh), (0, 0, 255), 2)
-        frame_bgr[int(frame_h * 0.55):frame_h, :] = roi
+        #roi   = frame_bgr[int(frame_h * 0.55):frame_h, :]
+        #gray  = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        #edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 120)
+        #edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        #cnt_obs, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        #for c in cnt_obs:
+        #    if cv2.contourArea(c) < MIN_OBST_AREA:
+        #        continue
+        #    ox, oy, ow, oh = cv2.boundingRect(c)
+        #    if ow < 12 or oh < 6:
+        #        continue
+        #    cv2.rectangle(roi, (ox, oy), (ox+ow, oy+oh), (0, 0, 255), 2)
+        #frame_bgr[int(frame_h * 0.55):frame_h, :] = roi
 
         # rijcommando + LED afhankelijk van modus
         if robot_mode == MODE_AUTO:
@@ -414,8 +422,16 @@ async def vision_loop():
         cv2.putText(frame_bgr, label, (5, 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-        # JPEG bouwen
-        img = Image.fromarray(frame_bgr)
+        # JPEG bouwen — debug-stap selecteren
+        _debug_frames = {
+            "raw":    raw_bgr,
+            "hsv":    cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR),
+            "mask":   cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR),
+            "bekers": cups_bgr,
+            "final":  frame_bgr,
+        }
+        display_frame = _debug_frames.get(_vision_debug_step, frame_bgr)
+        img = Image.fromarray(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB))
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=70)
         latest_jpeg = buf.getvalue()
@@ -490,6 +506,7 @@ async def handle_control_ws(reader, writer, request):
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
+    global _vision_debug_step
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -505,6 +522,7 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"gripper_speeds:{gripper_jog_speed},{gripper_auto_speed},{gripper_home_speed}")
     lo, hi = LOWER_HSV.tolist(), UPPER_HSV.tolist()
     await _ws_send_text(writer, f"hsv:{lo[0]},{lo[1]},{lo[2]},{hi[0]},{hi[1]},{hi[2]}")
+    await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
 
     try:
         while True:
@@ -553,6 +571,10 @@ async def handle_control_ws(reader, writer, request):
                     print(f"[brain] gripper speeds: jog={gripper_jog_speed} auto={gripper_auto_speed} home={gripper_home_speed}")
                 except Exception:
                     pass
+
+            elif msg.startswith("set_vision_step:"):
+                _vision_debug_step = msg.split(":", 1)[1].strip()
+                print(f"[brain] vision stap → {_vision_debug_step}")
 
             elif msg == "reset_obstacles":
                 obstacle_map.clear()

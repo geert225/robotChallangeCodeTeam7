@@ -74,7 +74,9 @@ def write_command(mode, speed=0.0):
 
 def run_auto():
     """Standaard afloop: draait ROTATIES slagen, vertraagt op het einde."""
-    start_enc = read_encoder()
+    global next_encoder_start_pose
+    #start_enc = read_encoder()
+    start_enc = next_encoder_start_pose
     end_enc = start_enc + (ROTATIES * ENC_PPR)
     slow = False
 
@@ -104,6 +106,9 @@ def run_auto():
 
     act_enc = read_encoder()
     print(f"[gripper] auto klaar, rest encoderfout: {end_enc - act_enc}")
+    error_enc = end_enc - act_enc
+
+    next_encoder_start_pose = (act_enc - error_enc)
 
     # Terug naar IDLE na voltooiing
     write_command(MODE_IDLE)
@@ -128,8 +133,11 @@ def run_idle():
 # =========================
 prev_mode = None
 prev_speed = None
+next_encoder_start_pose = 0
 
 print("[gripper] gestart, luistert op", CMD_SHM_PATH)
+
+next_encoder_start_pose = read_encoder()
 
 while True:
     mode, speed = read_command()
@@ -139,6 +147,7 @@ while True:
             run_idle()
         prev_mode = mode
         time.sleep(0.05)
+        next_encoder_start_pose = read_encoder()
 
     elif mode == MODE_AUTO:
         if prev_mode != MODE_AUTO:
@@ -159,3 +168,4 @@ while True:
         run_idle()
         prev_mode = MODE_IDLE
         time.sleep(0.05)
+        next_encoder_start_pose = read_encoder()
