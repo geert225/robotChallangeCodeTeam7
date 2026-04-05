@@ -23,7 +23,7 @@ ENABLE_ADDON = True
 PWM_FORMAT   = "<16H"
 ULTRA_FORMAT = "<ddHH"
 LED_FORMAT   = "<7B"
-SERVO_FORMAT = "<2B"
+SERVO_FORMAT = "<B"
 GYRO_FORMAT  = "<dddd"   # (timestamp, roll, pitch, yaw)   yaw in graden
 ACCEL_FORMAT = "<ddd"    # (timestamp, ax_world [m/s²], ay_world [m/s²])
                          # wereldframe, zwaartekracht al afgetrokken
@@ -222,7 +222,8 @@ while True:
         servo_values = shm_read(shm_servo, fd_servo, SERVO_FORMAT)
 
         if first_run or servo_values != prev_servo:
-            addon.set_servo(*servo_values)
+            #print(f"servo waarde {servo_values[0]}")
+            addon.set_servo(servo_values[0])
             prev_servo = servo_values
 
         # ------------------------
@@ -235,31 +236,7 @@ while True:
 
             mode, r1, g1, b1, r2, g2, b2 = led_values
 
-            if mode == 0:
-                addon.set_led(0, 0, 0)
-
-            elif mode == 1:
-                addon.set_led(r1, g1, b1)
-
-            elif mode == 2:
-                if now - last_led_toggle > 0.5:
-                    led_state = not led_state
-                    last_led_toggle = now
-
-                if led_state:
-                    addon.set_led(r1, g1, b1)
-                else:
-                    addon.set_led(0, 0, 0)
-
-            elif mode == 3:
-                if now - last_led_toggle > 0.5:
-                    led_state = not led_state
-                    last_led_toggle = now
-
-                if led_state:
-                    addon.set_led(r1, g1, b1)
-                else:
-                    addon.set_led(r2, g2, b2)
+            addon.set_led(mode, r1, g1, b1, r2, g2, b2)
 
         # ------------------------
         # Ultrasonic
@@ -338,3 +315,4 @@ while True:
         print("MPU error:", e)
 
     time.sleep(0.002)
+    first_run = False

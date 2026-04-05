@@ -29,6 +29,7 @@ import json
 from PIL import Image
 import numpy as np
 import cv2
+from obstacle_map import ObstacleMap
 
 # ============================================================
 # CALIBRATIE  (HSV blob-detectie — wordt opgeslagen op schijf)
@@ -243,6 +244,15 @@ def _apply_avoidance(vx: float, vy: float, omega: float):
         elif front < ULTRA_WARN_CM:
             vx *= (front - ULTRA_SAFE_CM) / (ULTRA_WARN_CM - ULTRA_SAFE_CM)
     return vx, vy, omega
+
+# ============================================================
+# OBSTACLE MAP  (positiegebaseerde obstakelskaart)
+# Wordt gevuld door obstacle_map_loop() en gebruikt door home_loop().
+# ============================================================
+obstacle_map = ObstacleMap()
+
+# Maximale snelheid na het samenvoegen van HOME-vector + afstoting [m/s]
+_HOME_MAX_SPD_REPULSE = 1.1   # iets boven _HOME_MAX_SPD zodat afstoting ruimte heeft
 
 # ============================================================
 # SHARED MEMORY — VISION FRAME
@@ -539,6 +549,11 @@ async def handle_control_ws(reader, writer, request):
                 except Exception:
                     pass
 
+            elif msg == "reset_obstacles":
+                obstacle_map.clear()
+                print("[brain] obstacle_map gewist")
+                await _ws_send_text(writer, "obstacles:0:")
+
             elif msg.startswith("set_hsv:"):
                 try:
                     v = [int(x) for x in msg.split(":", 1)[1].split(",")]
@@ -695,6 +710,42 @@ async def pose_loop():
         await asyncio.sleep(0.2)   # 5 Hz is genoeg voor visualisatie
 
 # ============================================================
+# OBSTACLE MAP LOOP  (5 Hz)
+# Leest huidige pose + ultrasoonmeting en voegt mogelijke obstakels
+# toe aan de kaart. Draait in ALLE modi zodat de kaart tijdens de
+# verkenning (MANUAL / AUTO) al wordt opgebouwd.
+# ============================================================
+_ULTRA_RECORD_MAX_CM = 150   # cm — metingen verder dan dit worden niet opgeslagen
+
+async def obstacle_map_loop():
+    """Vult de obstacle_map met sensordata (5 Hz)."""
+    _broadcast_counter = 0
+
+    while True:
+        px, py, pth = _read_pose()
+
+        # Neem de kortste geldige meting als schatter voor het dichtsbijzijnde obstakel
+        # (beide sensoren zitten aan de voorzijde)
+        candidates = [d for d in (_ultra_d1, _ultra_d2)
+                      if 0 < d <= _ULTRA_RECORD_MAX_CM]
+        if candidates:
+            d_front = min(candidates)
+            obstacle_map.add_reading(px, py, pth, d_front)
+
+        # Stuur obstakelkaart elke ~2 seconden naar clients (10 ticks × 0.2 s)
+        _broadcast_counter += 1
+        if _broadcast_counter >= 10 and _control_clients:
+            _broadcast_counter = 0
+            obs = obstacle_map.get_obstacles()
+            if obs:
+                pts = "|".join(f"{ox:.3f},{oy:.3f}" for ox, oy in obs)
+                await _broadcast(f"obstacles:{len(obs)}:{pts}")
+            else:
+                await _broadcast("obstacles:0:")
+
+        await asyncio.sleep(0.2)   # 5 Hz
+
+# ============================================================
 # HOME LOOP  — stuurt robot terug naar positie (0, 0, 0)
 # Rijdt op 20 Hz; stopt automatisch en schakelt naar MANUAL.
 # ============================================================
@@ -765,11 +816,15 @@ async def home_loop():
                     omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
                     write_drive_cmd(0.0, 0.0, omega)
                 else:
-                    # Fase 2: rechtdoor rijden + kleine kopscorrectie
+                    # Fase 2: rechtdoor rijden + kleine kopscorrectie + obstakelafstoting
                     vx_robot = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
                     omega    = _HOME_K_OMEGA * align_err
                     omega    = max(-_HOME_MAX_OMG * 0.4, min(_HOME_MAX_OMG * 0.4, omega))
-                    write_drive_cmd(vx_robot, 0.0, omega)
+                    # Obstakelafstoting: alleen laterale component (vy) toepassen
+                    # zodat de vooruitsnelheid niet geblokkeerd raakt door de regelaar
+                    _, vy_rep = obstacle_map.apply_repulsion(px, py, pth, 0.0, 0.0)
+                    vy_clamped = max(-_HOME_MAX_SPD * 0.6, min(_HOME_MAX_SPD * 0.6, vy_rep))
+                    write_drive_cmd(vx_robot, vy_clamped, omega)
             else:
                 # Fase 3: op positie, draai naar theta=0
                 omega = _HOME_K_OMEGA * th_err
@@ -794,6 +849,17 @@ async def home_loop():
             sin_t    = math.sin(pth)
             vx_robot =  vx_w * cos_t + vy_w * sin_t
             vy_robot = -vx_w * sin_t + vy_w * cos_t
+
+            # ── Obstakelafstoting op HOME-pad ─────────────────────────────
+            vx_robot, vy_robot = obstacle_map.apply_repulsion(
+                px, py, pth, vx_robot, vy_robot)
+            # Begrens totale snelheid na samenvoegen HOME-vector + afstoting
+            combined_spd = math.sqrt(vx_robot**2 + vy_robot**2)
+            if combined_spd > _HOME_MAX_SPD_REPULSE:
+                factor = _HOME_MAX_SPD_REPULSE / combined_spd
+                vx_robot *= factor
+                vy_robot *= factor
+
             write_drive_cmd(vx_robot, vy_robot, omega)
 
         await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
@@ -817,6 +883,7 @@ async def main():
             heartbeat(),
             ultra_loop(),
             pose_loop(),
+            obstacle_map_loop(),
             home_loop()
         )
 

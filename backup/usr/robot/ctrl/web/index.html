@@ -226,6 +226,10 @@
         <button class="btn-small" onclick="resetPose()">Reset nulpunt</button>
         <button class="btn-small" onclick="mapZoomIn()">&#43;</button>
         <button class="btn-small" onclick="mapZoomOut()">&minus;</button>
+        <button class="btn-small" id="btn-reset-obs" onclick="resetObstacles()" title="Wis obstakelskaart">&#9749; Obstakels wissen</button>
+      </div>
+      <div id="obs-count" style="font-size:0.72em;color:#8b949e;margin-top:3px;display:none;">
+        Obstakels: <span id="obs-n">0</span>
       </div>
     </div>
     <img id="cam" alt="camera">
@@ -361,6 +365,20 @@ ws.onmessage = (e) => {
     setSlider("sl-hl","sv-hl", v[0]); setSlider("sl-sl","sv-sl", v[1]); setSlider("sl-vl","sv-vl", v[2]);
     setSlider("sl-hh","sv-hh", v[3]); setSlider("sl-sh","sv-sh", v[4]); setSlider("sl-vh","sv-vh", v[5]);
     drawHsvPreview();
+  } else if (d.startsWith("obstacles:")) {
+    const parts = d.split(":");
+    const n = parseInt(parts[1]);
+    obstacles = [];
+    if (n > 0 && parts[2]) {
+      parts[2].split("|").forEach(pt => {
+        const xy = pt.split(",").map(Number);
+        if (xy.length === 2 && !isNaN(xy[0])) obstacles.push({ x: xy[0], y: xy[1] });
+      });
+    }
+    const countEl = document.getElementById("obs-count");
+    document.getElementById("obs-n").textContent = obstacles.length;
+    countEl.style.display = obstacles.length > 0 ? "block" : "none";
+    drawMap(...lastPose());
   }
 };
 
@@ -525,6 +543,7 @@ function drawHsvPreview() {
 let poseOffset = { x: 0, y: 0, th: 0 };
 let currentRaw = { x: 0, y: 0, th: 0 };
 let trail = [];
+let obstacles = [];   // [{x,y}, …]  — wereldframe [m], van obstacle_map_loop
 const TRAIL_MAX = 2000;
 let mapScale = 60;
 
@@ -573,6 +592,19 @@ function drawMap(x, y, th) {
     mapCtx.stroke();
   }
 
+  // Obstakels (oranje stippen, wereldframe)
+  obstacles.forEach(ob => {
+    const opx = cx + (ob.x - poseOffset.x) * mapScale;
+    const opy = cy - (ob.y - poseOffset.y) * mapScale;
+    mapCtx.beginPath();
+    mapCtx.arc(opx, opy, 5, 0, 2 * Math.PI);
+    mapCtx.fillStyle = "rgba(240,136,62,0.85)";
+    mapCtx.fill();
+    mapCtx.strokeStyle = "#7a3800";
+    mapCtx.lineWidth = 1;
+    mapCtx.stroke();
+  });
+
   // Robot
   const rpx = cx+x*mapScale, rpy = cy-y*mapScale;
   mapCtx.fillStyle = "#f85149"; mapCtx.beginPath(); mapCtx.arc(rpx,rpy,9,0,2*Math.PI); mapCtx.fill();
@@ -588,6 +620,12 @@ function drawMap(x, y, th) {
 function resetPose() {
   poseOffset.x = currentRaw.x; poseOffset.y = currentRaw.y; poseOffset.th = currentRaw.th;
   trail = []; send("pose_reset");
+}
+function resetObstacles() {
+  obstacles = [];
+  document.getElementById("obs-count").style.display = "none";
+  send("reset_obstacles");
+  drawMap(...lastPose());
 }
 function mapZoomIn()  { mapScale = Math.min(mapScale*1.5, 500); drawMap(...lastPose()); }
 function mapZoomOut() { mapScale = Math.max(mapScale/1.5,   4); drawMap(...lastPose()); }

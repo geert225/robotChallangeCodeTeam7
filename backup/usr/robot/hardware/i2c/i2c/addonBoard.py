@@ -25,32 +25,33 @@ class AddonBoard:
             raise TypeError("data must be a list")
 
         payload = [cmd] + data
+
+        #print(f"sending payload: {payload}")
         self.i2c.write_raw(self.address, payload)
 
     # ------------------------
     # Servo control
     # ------------------------
-    def set_servo(self, angle1, angle2):
-        """
-        angle1, angle2: 0 - 180 graden
-        """
-        angle1 = max(0, min(180, int(angle1)))
-        angle2 = max(0, min(180, int(angle2)))
-
-        self._send_command(self.CMD_SERVO, [angle1, angle2])
+    def set_servo(self, mode):
+        #print(f"set servo {mode}")
+        self._send_command(self.CMD_SERVO, [mode])
 
     # ------------------------
     # LED control
     # ------------------------
-    def set_led(self, r, g, b):
+    def set_led(self, m, r1, g1, b1, r2, g2, b2):
         """
         RGB: 0 - 255
         """
-        r = max(0, min(255, int(r)))
-        g = max(0, min(255, int(g)))
-        b = max(0, min(255, int(b)))
+        r1 = max(0, min(3, int(r1)))
+        r1 = max(0, min(255, int(r1)))
+        g1 = max(0, min(255, int(g1)))
+        b1 = max(0, min(255, int(b1)))
+        r2 = max(0, min(255, int(r2)))
+        g2 = max(0, min(255, int(g2)))
+        b2 = max(0, min(255, int(b2)))
 
-        self._send_command(self.CMD_LED, [r, g, b])
+        self._send_command(self.CMD_LED, [m, r1, g1, b1, r2, g2, b2])
 
     # ------------------------
     # Ultrasonic read

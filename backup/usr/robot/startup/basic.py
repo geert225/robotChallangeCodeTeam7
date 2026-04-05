@@ -11,6 +11,7 @@ PROCESS_COMMANDS = [
     ("I2C", ["python", "../hardware/i2c/i2c.py"]),
     ("MECANUM", ["python", "../motors/mecanum.py"]),
     #("CAMERA", ["python", "../vision/camera.py"]),
+    ("ODOMERY", ["python", "../ctrl/odometry.py"]),
 ]
 
 # Shutdown script
