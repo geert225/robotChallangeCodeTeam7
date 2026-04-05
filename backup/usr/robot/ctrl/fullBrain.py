@@ -65,14 +65,33 @@ robot_mode  = MODE_MANUAL          # beginstand = MANUAL
 # AUTO MODUS STATES
 # ============================================================
 AUTO_IDLE               = "idle"        # in deze state wachten op start commando
-AUTO_INIT               = "init"        # in deze state alle waardes initalizeren
+AUTO_INIT               = "init"        # in deze state alle waardes initalizeren (klep dicht en teller ressetten)
 AUTO_SEARCH             = "zoeken"      # rondjes draaien tot target gevonden is
-AUTO_DRIVE_TRAGET       = "goTraget"    # rijden naar gevonden target met obstakel ontwijking
-AUTO_DRIVE_PICKUP       = "goPickup"    # als target onder het rad komt een standaard op pak procudure uitvoeren
-AUTO_PICKUP             = "pickup"      # opraap routine starten
-AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden
+AUTO_DRIVE_TRAGET       = "goTraget"    # rijden naar gevonden target met obstakel ontwijking (als tragert kwijt dan naar zoeken behalve als onder rad dan naar gopickup)
+AUTO_DRIVE_PICKUP       = "goPickup"    # als target (paars beker) onder het rad (geel blok) komt een standaard op pak procudure uitvoeren
+AUTO_PICKUP             = "pickup"      # opraap routine starten (optellen aantal bekers)
+AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden -> als robot x aantal bekers opgepakt heeft
 AUTO_LOSSEN             = "lossen"      # laad klep open zetten
 auto_state              = AUTO_IDLE
+
+# ============================================================
+# AUTO STATE MACHINE — gedeelde data met vision_loop
+# ============================================================
+_auto_bekers: list  = []    # laatste beker-detecties (gevuld door vision_loop)
+_auto_frame_w: int  = 320   # frame breedte (gevuld door vision_loop)
+_auto_cup_count: int = 0    # aantal opgepakte bekers in huidige cyclus
+AUTO_MAX_CUPS        = 3    # aantal bekers voordat robot terugrijdt naar start
+
+# ============================================================
+# LAADKLEP — DUMMY FUNCTIES  (TODO: vervang door hardware-aansturing)
+# ============================================================
+def _klep_open():
+    """Laadklep openen — TODO: implementeer hardware sturing."""
+    print("[auto] laadklep OPEN (dummy)")
+
+def _klep_dicht():
+    """Laadklep sluiten — TODO: implementeer hardware sturing."""
+    print("[auto] laadklep DICHT (dummy)")
 
 # ============================================================
 # SHARED MEMORY — HELPERS
@@ -314,8 +333,26 @@ DRIVE_SPEED     = 2.0
 DRIVE_MIN_OMEGA = 1.5
 MAX_TRACK_DIST  = 80
 
-_last_dir_pos = False
-_last_target  = None          # (cx, cy) van vorige frame
+# Persistent tracking — hoeveel frames het laatste target bewaard blijft als er
+# geen detectie is (voorkomt dat de robot zoekend gaat draaien bij korte occlussie)
+MAX_TARGET_LOST_FRAMES = 15   # ~300 ms bij 20 fps
+
+# Gele gripper-zone detectie (HSV, OpenCV-schaal: H 0–180)
+YELLOW_HSV_LOWER = np.array([18,  80,  80])
+YELLOW_HSV_UPPER = np.array([38, 255, 255])
+MIN_YELLOW_AREA  = 400   # kleinste gele blob die als gripper-vlak telt
+
+# Pickup-event drempelwaarden
+PICKUP_OVERLAP_RATIO = 0.25  # fractie van de beker-bbox die het gele vlak moet overlappen
+PICKUP_MIN_CUP_AREA  = 2500  # beker moet groot genoeg zijn (dichtbij) om event te triggeren
+
+_last_dir_pos  = False
+_last_target   = None   # (cx, cy) van vorige frame
+_target_lost_n = 0      # frames achtereen zonder detectie
+
+# Gedeeld resultaat vanuit vision_loop → auto_loop
+_yellow_zone   = None   # (x, y, w, h) van grootste gele blob, of None
+_pickup_ready  = False  # True wanneer beker voldoende overlapt met geel vlak
 
 
 def _classify_zone(cx, frame_w):
@@ -327,13 +364,24 @@ def _classify_zone(cx, frame_w):
 
 
 def _compute_velocity(bekers, frame_w):
-    global _last_dir_pos, _last_target
+    global _last_dir_pos, _last_target, _target_lost_n
 
     if not bekers:
+        _target_lost_n += 1
+        if _last_target is not None and _target_lost_n <= MAX_TARGET_LOST_FRAMES:
+            # Blijf sturen op laatste bekende positie (korte occlussie)
+            cx = _last_target[0]
+            error = (cx - frame_w // 2) / (frame_w // 2)
+            omega = 0.0 if abs(error) < ERROR_DEADBAND else max(-MAX_OMEGA, min(MAX_OMEGA, -K_OMEGA * error))
+            vx    = DRIVE_SPEED if abs(omega) < DRIVE_MIN_OMEGA else 0.0
+            return vx, 0.0, omega
+        # Target écht kwijt — start opnieuw zoeken
         _last_target = None
         return (0.0, 0.0, -SEARCH_OMEGA) if _last_dir_pos else (0.0, 0.0, SEARCH_OMEGA)
 
-    # target tracking
+    _target_lost_n = 0
+
+    # Kies beste beker: dichtst bij laatste bekende positie, anders grootste
     if _last_target is not None:
         hits = []
         for b in bekers:
@@ -367,7 +415,8 @@ _blink_counter = 0
 BLINK_TICKS    = 25   # ~500 ms bij 20 ms sleep
 
 async def vision_loop():
-    global latest_jpeg, _blink_counter
+    global latest_jpeg, _blink_counter, _auto_bekers, _auto_frame_w
+    global _yellow_zone, _pickup_ready
 
     while True:
         # frame lezen
@@ -399,7 +448,54 @@ async def vision_loop():
                 bekers.append((x, y, w, h, area))
                 cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-        cups_bgr = frame_bgr.copy()  # stap "bekers": na cup-boxes, vóór obstakeldetectie
+        cups_bgr = frame_bgr.copy()  # stap "bekers": na cup-boxes, vóór gele zone
+
+        # ── Gele gripper-zone detectie ────────────────────────────────────────
+        yellow_mask = cv2.inRange(hsv, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER)
+        yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_OPEN,
+                                       np.ones((5, 5), np.uint8))
+        ycnt, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        best_yellow = None
+        best_yellow_area = 0
+        for c in ycnt:
+            a = cv2.contourArea(c)
+            if a >= MIN_YELLOW_AREA and a > best_yellow_area:
+                best_yellow = cv2.boundingRect(c)   # (x, y, w, h)
+                best_yellow_area = a
+        _yellow_zone = best_yellow
+
+        # Visualiseer gele zone met stippellijn rand
+        if _yellow_zone is not None:
+            yx, yy, yw, yh = _yellow_zone
+            # dikke gele rand
+            cv2.rectangle(frame_bgr, (yx, yy), (yx + yw, yy + yh),
+                          (0, 220, 220), 2)
+            cv2.putText(frame_bgr, "GRIPPER", (yx + 2, yy - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
+
+        # ── Pickup-event: overlap beker × gele zone ───────────────────────────
+        _pickup_ready = False
+        if _yellow_zone is not None and bekers:
+            best_cup = max(bekers, key=lambda b: b[4])
+            bx, by, bw, bh, barea = best_cup
+            if barea >= PICKUP_MIN_CUP_AREA:
+                yx, yy, yw, yh = _yellow_zone
+                ix1 = max(bx, yx);      iy1 = max(by, yy)
+                ix2 = min(bx + bw, yx + yw); iy2 = min(by + bh, yy + yh)
+                if ix2 > ix1 and iy2 > iy1:
+                    overlap = (ix2 - ix1) * (iy2 - iy1)
+                    ratio   = overlap / (bw * bh)
+                    if ratio >= PICKUP_OVERLAP_RATIO:
+                        _pickup_ready = True
+                        # visuele feedback: gele rand rood + label
+                        cv2.rectangle(frame_bgr, (yx, yy), (yx + yw, yy + yh),
+                                      (0, 0, 255), 3)
+                        cv2.putText(frame_bgr,
+                                    f"PICKUP READY {ratio*100:.0f}%",
+                                    (yx + 2, yy - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                                    (0, 80, 255), 1)
 
         # obstakeldetectie (onderste helft)
         #roi   = frame_bgr[int(frame_h * 0.55):frame_h, :]
@@ -418,9 +514,9 @@ async def vision_loop():
 
         # rijcommando + LED afhankelijk van modus
         if robot_mode == MODE_AUTO:
-            vx, vy, omega = _compute_velocity(bekers, frame_w)
-            vx, vy, omega = _apply_avoidance(vx, vy, omega)
-            write_drive_cmd(vx, vy, omega)
+            # Deel beker-data met auto_loop state machine (die schrijft rijcommando's)
+            _auto_bekers = bekers
+            _auto_frame_w = frame_w
 
             # LED: elke BLINK_TICKS ticks de blink-toestand wisselen
             _blink_counter += 1
@@ -428,7 +524,7 @@ async def vision_loop():
                 _blink_counter = 0
                 led_auto_update(has_target=bool(bekers))
 
-            label = f"AUTO  vx:{vx:.2f} vy:{vy:.2f} w:{omega:.2f} bekers:{len(bekers)}"
+            label = f"AUTO [{auto_state}]  bekers:{len(bekers)}"
         else:
             label = f"MANUAL  bekers:{len(bekers)}"
 
@@ -519,7 +615,7 @@ async def handle_control_ws(reader, writer, request):
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
-    global _vision_debug_step
+    global _vision_debug_step, auto_state
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -556,10 +652,27 @@ async def handle_control_ws(reader, writer, request):
 
             elif msg == "set_mode:auto":
                 robot_mode  = MODE_AUTO
+                auto_state  = AUTO_INIT    # altijd initialiseren bij wisselen naar AUTO
                 drive_state = {"vx": 0.0, "vy": 0.0, "omega": 0.0}
                 _blink_counter = 0
-                print("[brain] → AUTO")
+                print("[brain] → AUTO (INIT)")
                 await _ws_send_text(writer, "mode:auto")
+                await _ws_send_text(writer, f"auto_state:{auto_state}")
+
+            elif msg == "auto_start":
+                # Start vanuit IDLE (als robot al in AUTO staat)
+                if robot_mode == MODE_AUTO and auto_state == AUTO_IDLE:
+                    auto_state = AUTO_INIT
+                    print("[brain] auto_start → INIT")
+                    await _ws_send_text(writer, f"auto_state:{auto_state}")
+
+            elif msg == "auto_stop":
+                # Zet state terug naar IDLE en stop rijden
+                if robot_mode == MODE_AUTO:
+                    auto_state = AUTO_IDLE
+                    write_drive_cmd(0.0, 0.0, 0.0)
+                    print("[brain] auto_stop → IDLE")
+                    await _ws_send_text(writer, f"auto_state:{auto_state}")
 
             elif msg == "set_mode:home":
                 robot_mode  = MODE_HOME
@@ -908,6 +1021,154 @@ async def home_loop():
         await asyncio.sleep(0.05)   # 20 Hz
 
 # ============================================================
+# AUTO LOOP  — state machine voor autonoom rijden (20 Hz)
+# _auto_bekers en _auto_frame_w worden gevuld door vision_loop.
+# ============================================================
+async def auto_loop():
+    global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode
+    _prev_state = None
+
+    while True:
+        if robot_mode != MODE_AUTO:
+            _prev_state = None
+            await asyncio.sleep(0.05)
+            continue
+
+        # Broadcast state-wijziging naar alle WS-clients
+        if auto_state != _prev_state:
+            await _broadcast(f"auto_state:{auto_state}")
+            _prev_state = auto_state
+
+        # ── IDLE ─────────────────────────────────────────────────────────────
+        # Wacht op start-commando (via WebSocket: "auto_start")
+        if auto_state == AUTO_IDLE:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            await asyncio.sleep(0.05)
+
+        # ── INIT ─────────────────────────────────────────────────────────────
+        # Reset tellers, sluit laadklep, dan direct naar SEARCH
+        elif auto_state == AUTO_INIT:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            _auto_cup_count = 0
+            _klep_dicht()
+            print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
+            auto_state = AUTO_SEARCH
+            await asyncio.sleep(0.1)
+
+        # ── SEARCH ───────────────────────────────────────────────────────────
+        # Draai langzaam rond tot er een beker in beeld komt
+        elif auto_state == AUTO_SEARCH:
+            if _auto_bekers:
+                print("[auto] SEARCH: beker gevonden → DRIVE_TARGET")
+                auto_state = AUTO_DRIVE_TRAGET
+            else:
+                write_drive_cmd(0.0, 0.0, SEARCH_OMEGA)
+            await asyncio.sleep(0.05)
+
+        # ── DRIVE TARGET ─────────────────────────────────────────────────────
+        # Rij naar de gevonden beker; obstakelvermijding actief.
+        # _pickup_ready (vision event) → DRIVE_PICKUP.
+        # Beker kwijt buiten tolerantie → SEARCH.
+        elif auto_state == AUTO_DRIVE_TRAGET:
+            # Pickup-event heeft prioriteit (ook als bekers leeg is door occlusie)
+            if _pickup_ready:
+                write_drive_cmd(0.0, 0.0, 0.0)
+                print("[auto] DRIVE_TARGET: pickup-event → DRIVE_PICKUP")
+                auto_state = AUTO_DRIVE_PICKUP
+                await asyncio.sleep(0.05)
+                continue
+
+            if not _auto_bekers and _last_target is None:
+                # Target écht kwijt (persistent tracking uitgeput)
+                print("[auto] DRIVE_TARGET: target kwijt → SEARCH")
+                auto_state = AUTO_SEARCH
+                await asyncio.sleep(0.05)
+                continue
+
+            vx, vy, omega = _compute_velocity(_auto_bekers, _auto_frame_w)
+            vx, vy, omega = _apply_avoidance(vx, vy, omega)
+            write_drive_cmd(vx, vy, omega)
+            await asyncio.sleep(0.05)
+
+        # ── DRIVE PICKUP ─────────────────────────────────────────────────────
+        # Rij op exacte opraap-positie onder het pickup-rad.
+        # TODO: verfijn positie met visie/encoders. Dummy: direct naar PICKUP.
+        elif auto_state == AUTO_DRIVE_PICKUP:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            print("[auto] DRIVE_PICKUP: op opraap-positie → PICKUP")
+            auto_state = AUTO_PICKUP
+            await asyncio.sleep(0.2)
+
+        # ── PICKUP ───────────────────────────────────────────────────────────
+        # Start gripper auto-cyclus en wacht op voltooiing.
+        # TODO: gebruik gripper-encoder feedback i.p.v. vaste sleep.
+        elif auto_state == AUTO_PICKUP:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            write_gripper_cmd(GRIPPER_AUTO_CMD)
+            print("[auto] PICKUP: gripper gestart")
+            await asyncio.sleep(2.0)   # TODO: wacht op encoder-feedback
+            write_gripper_cmd(GRIPPER_IDLE)
+
+            _auto_cup_count += 1
+            print(f"[auto] PICKUP: beker #{_auto_cup_count} opgepakt")
+            await _broadcast(f"auto_cups:{_auto_cup_count}")
+
+            if _auto_cup_count >= AUTO_MAX_CUPS:
+                print(f"[auto] PICKUP: {AUTO_MAX_CUPS} bekers vol → TO_START")
+                auto_state = AUTO_TO_START
+            else:
+                auto_state = AUTO_SEARCH
+            await asyncio.sleep(0.1)
+
+        # ── TO START ─────────────────────────────────────────────────────────
+        # Rijd terug naar startpositie (0, 0, θ=0) via holonomic regelaar.
+        elif auto_state == AUTO_TO_START:
+            px, py, pth = _read_pose()
+            dist   = math.sqrt(px*px + py*py)
+            th_err = _angle_wrap(-pth)
+
+            if dist < _HOME_DONE_XY and abs(th_err) < _HOME_DONE_TH:
+                write_drive_cmd(0.0, 0.0, 0.0)
+                print("[auto] TO_START: startpositie bereikt → LOSSEN")
+                auto_state = AUTO_LOSSEN
+            else:
+                omega_lim = _HOME_MAX_OMG if dist > _HOME_DONE_XY else _HOME_FINAL_OMG
+                omega     = max(-omega_lim, min(omega_lim, _HOME_K_OMEGA * th_err))
+
+                vx_w = _HOME_K_POS * (-px)
+                vy_w = _HOME_K_POS * (-py)
+                spd  = math.sqrt(vx_w*vx_w + vy_w*vy_w)
+                if spd > _HOME_MAX_SPD:
+                    vx_w *= _HOME_MAX_SPD / spd
+                    vy_w *= _HOME_MAX_SPD / spd
+
+                cos_t    = math.cos(pth)
+                sin_t    = math.sin(pth)
+                vx_robot =  vx_w * cos_t + vy_w * sin_t
+                vy_robot = -vx_w * sin_t + vy_w * cos_t
+                vx_robot, vy_robot = obstacle_map.apply_repulsion(
+                    px, py, pth, vx_robot, vy_robot)
+
+                write_drive_cmd(vx_robot, vy_robot, omega)
+
+            await asyncio.sleep(0.05)
+
+        # ── LOSSEN ───────────────────────────────────────────────────────────
+        # Open laadklep, wacht tot bekers zijn gevallen, sluit klep → IDLE.
+        elif auto_state == AUTO_LOSSEN:
+            write_drive_cmd(0.0, 0.0, 0.0)
+            _klep_open()
+            print("[auto] LOSSEN: klep open, bekers lossen...")
+            await asyncio.sleep(3.0)   # TODO: pas duur aan op basis van hardware
+            _klep_dicht()
+            print("[auto] LOSSEN: klep dicht → IDLE")
+            auto_state = AUTO_IDLE
+            await asyncio.sleep(0.1)
+
+        else:
+            await asyncio.sleep(0.05)
+
+# ============================================================
 # MAIN
 # ============================================================
 async def main():
@@ -926,7 +1187,8 @@ async def main():
             ultra_loop(),
             pose_loop(),
             obstacle_map_loop(),
-            home_loop()
+            home_loop(),
+            auto_loop()
         )
 
 if __name__ == "__main__":

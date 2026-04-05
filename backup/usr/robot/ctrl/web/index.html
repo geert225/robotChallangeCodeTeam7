@@ -57,9 +57,53 @@
   #status { font-size: 0.8em; color: #8b949e; margin-bottom: 6px; }
   .info-bar { border-radius: 6px; padding: 7px 12px; margin-bottom: 8px;
               font-size: 0.88em; display: none; }
-  #auto-info { background: #0e3a1f; border-left: 3px solid #3fb950; color: #7ee787; }
+  #auto-info { background: #0e3a1f; border-left: 3px solid #3fb950; color: #7ee787; padding: 10px 14px; }
   #home-info { background: #3b1c00; border-left: 3px solid #f0883e; color: #fdba74; }
   #home-dist { font-weight: bold; }
+
+  /* ── Auto dashboard ──────────────────────────────────────────── */
+  #auto-dashboard {
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 12px; width: 100%;
+  }
+  #auto-state-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: #0a2215; border: 1px solid #238636;
+    border-radius: 20px; padding: 4px 14px;
+    font-size: 0.92em; font-weight: bold; white-space: nowrap;
+  }
+  #auto-state-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #3fb950; flex-shrink: 0;
+    animation: pulse-dot 1.2s ease-in-out infinite;
+  }
+  #auto-state-dot.idle { background: #484f58; animation: none; }
+  #auto-state-dot.active { background: #3fb950; }
+  #auto-state-dot.busy  { background: #d29922; }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; } 50% { opacity: 0.3; }
+  }
+  #auto-cups-wrap {
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  #auto-cups-icons { display: flex; gap: 4px; align-items: center; }
+  .cup-icon {
+    width: 22px; height: 22px; border-radius: 4px;
+    border: 2px solid #238636; background: #0a2215;
+    transition: background 0.3s, border-color 0.3s;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.7em;
+  }
+  .cup-icon.filled { background: #3fb950; border-color: #56d364; }
+  #auto-cups-label { font-size: 0.82em; color: #8b949e; }
+  #btn-auto-start {
+    background: #238636; color: #fff; border: none; border-radius: 8px;
+    padding: 6px 16px; font-size: 0.88em; font-weight: bold;
+    cursor: pointer; margin-left: auto;
+    transition: background 0.2s;
+  }
+  #btn-auto-start:hover { background: #2ea043; }
+  #btn-auto-start:disabled { opacity: 0.4; cursor: default; }
 
   /* ── Main layout ─────────────────────────────────────────────── */
   #main { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -176,7 +220,19 @@
 <div id="status">Verbinden&hellip;</div>
 
 <!-- ── Info bars ───────────────────────────────────────────────── -->
-<div id="auto-info" class="info-bar">&#9654; Robot rijdt autonoom op vision.</div>
+<div id="auto-info" class="info-bar">
+  <div id="auto-dashboard">
+    <div id="auto-state-badge">
+      <div id="auto-state-dot" class="idle"></div>
+      <span id="auto-state-label">Wachten op start</span>
+    </div>
+    <div id="auto-cups-wrap">
+      <div id="auto-cups-icons"><!-- gevuld door JS --></div>
+      <span id="auto-cups-label">0 / 3 bekers</span>
+    </div>
+    <button id="btn-auto-start" onclick="autoStartStop()">&#9654; Start</button>
+  </div>
+</div>
 <div id="home-info" class="info-bar">
   &#8617; Navigeert naar startpositie&hellip; &nbsp;
   Afstand: <span id="home-dist">--</span> cm &nbsp;|&nbsp;
@@ -372,6 +428,31 @@ let ws       = new WebSocket("ws://" + location.host + "/ws");
 let camWs    = new WebSocket("ws://" + location.host + "/cam");
 let mode     = "manual";
 let pressTimer = null;
+let autoState  = "idle";
+let autoCups   = 0;
+const AUTO_MAX_CUPS = 3;
+
+// ── Auto state vertalingen + dot-klasse ──────────────────────
+const AUTO_STATE_NL = {
+  idle:        "Wachten op start",
+  init:        "Initialiseren...",
+  zoeken:      "Zoeken naar beker",
+  goTraget:    "Rijden naar beker",
+  goPickup:    "Positioneren voor opraap",
+  pickup:      "Beker oprapen",
+  toStartPos:  "Terugrijden naar start",
+  lossen:      "Bekers lossen",
+};
+const AUTO_STATE_DOT = {
+  idle:        "idle",
+  init:        "busy",
+  zoeken:      "active",
+  goTraget:    "active",
+  goPickup:    "busy",
+  pickup:      "busy",
+  toStartPos:  "active",
+  lossen:      "busy",
+};
 
 camWs.binaryType = "blob";
 camWs.onmessage  = (e) => {
@@ -489,6 +570,10 @@ ws.onmessage = (e) => {
     document.getElementById("cp-lower").value = hsvToHex(v[0], v[1], v[2]);
     document.getElementById("cp-upper").value = hsvToHex(v[3], v[4], v[5]);
     drawHsvPreview();
+  } else if (d.startsWith("auto_state:")) {
+    applyAutoState(d.slice(11));
+  } else if (d.startsWith("auto_cups:")) {
+    applyAutoCups(parseInt(d.slice(10)));
   } else if (d.startsWith("vision_step:")) {
     document.getElementById("vision-step").value = d.slice(12);
   } else if (d.startsWith("obstacles:")) {
@@ -565,6 +650,8 @@ function applyMode(newMode) {
     btnSwitch.textContent = "Stop AUTO"; btnSwitch.className = "btn-switch auto";
     ctrl.classList.add("hidden"); gripper.classList.add("hidden");
     autoInfo.style.display = "block";
+    applyAutoCups(0);
+    applyAutoState("init");
   } else if (mode === "home") {
     badge.textContent = "HOME"; badge.className = "badge-home";
     btnSwitch.textContent = "Start AUTO"; btnSwitch.className = "btn-switch";
@@ -575,6 +662,45 @@ function applyMode(newMode) {
   } else {
     badge.textContent = "MANUAL"; badge.className = "badge-manual";
     btnSwitch.textContent = "Start AUTO"; btnSwitch.className = "btn-switch";
+  }
+}
+
+// ── Auto state dashboard ──────────────────────────────────────
+function applyAutoState(state) {
+  autoState = state;
+  const label   = document.getElementById("auto-state-label");
+  const dot     = document.getElementById("auto-state-dot");
+  const startBtn = document.getElementById("btn-auto-start");
+  label.textContent = AUTO_STATE_NL[state] || state;
+  dot.className = AUTO_STATE_DOT[state] || "active";
+  if (state === "idle") {
+    startBtn.textContent = "\u25B6 Start";
+    startBtn.disabled    = false;
+  } else {
+    startBtn.textContent = "\u23F9 Stop";
+    startBtn.disabled    = false;
+  }
+}
+
+function applyAutoCups(n) {
+  autoCups = n;
+  document.getElementById("auto-cups-label").textContent = `${n} / ${AUTO_MAX_CUPS} bekers`;
+  const icons = document.getElementById("auto-cups-icons");
+  icons.innerHTML = "";
+  for (let i = 0; i < AUTO_MAX_CUPS; i++) {
+    const div = document.createElement("div");
+    div.className = "cup-icon" + (i < n ? " filled" : "");
+    div.title = i < n ? "Beker opgepakt" : "Leeg";
+    div.textContent = i < n ? "\u2615" : "";
+    icons.appendChild(div);
+  }
+}
+
+function autoStartStop() {
+  if (autoState === "idle") {
+    send("auto_start");
+  } else {
+    send("auto_stop");
   }
 }
 
