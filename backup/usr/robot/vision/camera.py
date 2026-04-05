@@ -37,7 +37,7 @@ mm = mmap.mmap(fd, TOTAL_SIZE, mmap.MAP_SHARED, mmap.PROT_WRITE)
 picam2 = Picamera2()
 
 config = picam2.create_video_configuration(
-    main={"format": "RGB888", "size": (WIDTH, HEIGHT)},
+    main={"format": "BGR888", "size": (WIDTH, HEIGHT)},
     controls={"FrameRate": 40},
     transform=Transform(hflip=1, vflip=1)  # 180° rotatie
 )

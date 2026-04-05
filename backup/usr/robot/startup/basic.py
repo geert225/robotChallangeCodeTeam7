@@ -10,7 +10,8 @@ PROCESS_COMMANDS = [
     ("ENCODERS", ["python", "../hardware/encoders/encoders.py"]),
     ("I2C", ["python", "../hardware/i2c/i2c.py"]),
     ("MECANUM", ["python", "../motors/mecanum.py"]),
-    #("CAMERA", ["python", "../vision/camera.py"]),
+    ("CAMERA", ["python", "../vision/camera.py"]),
+    ("GRIPPER", ["python", "../motors/gripper.py"]),
     ("ODOMERY", ["python", "../ctrl/odometry.py"]),
 ]
 

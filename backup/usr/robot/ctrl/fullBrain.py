@@ -62,6 +62,19 @@ MODE_HOME   = "home"
 robot_mode  = MODE_MANUAL          # beginstand = MANUAL
 
 # ============================================================
+# AUTO MODUS STATES
+# ============================================================
+AUTO_IDLE               = "idle"        # in deze state wachten op start commando
+AUTO_INIT               = "init"        # in deze state alle waardes initalizeren
+AUTO_SEARCH             = "zoeken"      # rondjes draaien tot target gevonden is
+AUTO_DRIVE_TRAGET       = "goTraget"    # rijden naar gevonden target met obstakel ontwijking
+AUTO_DRIVE_PICKUP       = "goPickup"    # als target onder het rad komt een standaard op pak procudure uitvoeren
+AUTO_PICKUP             = "pickup"      # opraap routine starten
+AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden
+AUTO_LOSSEN             = "lossen"      # laad klep open zetten
+auto_state              = AUTO_IDLE
+
+# ============================================================
 # SHARED MEMORY — HELPERS
 # ============================================================
 def _create_or_open_shm(path, size):
@@ -516,6 +529,7 @@ async def handle_control_ws(reader, writer, request):
     # stuur huidige staat direct na verbinding
     await _ws_send_text(writer, f"mode:{robot_mode}")
     await _ws_send_text(writer, f"ultra:{_ultra_d1},{_ultra_d2}")
+    await _ws_send_text(writer, f"gripper_enc:{_read_gripper_enc()}")
     px, py, pth = _read_pose()
     await _ws_send_text(writer, f"pose:{px:.4f},{py:.4f},{pth:.4f}")
     await _ws_send_text(writer, f"home_strat:{home_strategy}")
@@ -712,10 +726,13 @@ async def ultra_loop():
         _ultra_d1, _ultra_d2 = d1, d2
 
         if _control_clients:
-            msg = f"ultra:{d1},{d2}"
+            enc = _read_gripper_enc()
+            ultra_msg = f"ultra:{d1},{d2}"
+            enc_msg   = f"gripper_enc:{enc}"
             for w in list(_control_clients):
                 try:
-                    await _ws_send_text(w, msg)
+                    await _ws_send_text(w, ultra_msg)
+                    await _ws_send_text(w, enc_msg)
                 except Exception:
                     _control_clients.discard(w)
 

@@ -246,6 +246,10 @@
       <button class="btn-auto-trigger" onclick="send('gripper_auto')">
         &#9654; Gripper AUTO
       </button>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:3px;">
+        <span style="font-size:0.72em;color:#8b949e;">Encoder</span>
+        <span id="gripper-enc" style="font-size:0.95em;font-weight:bold;color:#58a6ff;font-family:monospace;">--</span>
+      </div>
     </div>
 
     <!-- ── Instellingen (altijd zichtbaar, in linker kolom) ──────── -->
@@ -456,6 +460,8 @@ ws.onmessage = (e) => {
   const d = e.data;
   if (d.startsWith("mode:")) {
     applyMode(d.slice(5));
+  } else if (d.startsWith("gripper_enc:")) {
+    document.getElementById("gripper-enc").textContent = d.slice(12);
   } else if (d.startsWith("ultra:")) {
     const p = d.slice(6).split(",");
     updateUltra("ultra-d1", parseInt(p[0]));

@@ -10,7 +10,7 @@ from motor import set_rad, rem_rad
 # CONFIG
 # =========================
 ROTATIES = 3
-ENC_PPR = 1238  # encoder pulses per rotation
+ENC_PPR = 1848  # encoder pulses per rotation
 
 # Modes
 MODE_IDLE = 0
@@ -74,20 +74,22 @@ def write_command(mode, speed=0.0):
 
 def run_auto():
     """Standaard afloop: draait ROTATIES slagen, vertraagt op het einde."""
-    global next_encoder_start_pose
+    global encoder_offset
     #start_enc = read_encoder()
-    start_enc = next_encoder_start_pose
-    end_enc = start_enc + (ROTATIES * ENC_PPR)
+    start_enc = read_encoder()
+    end_enc = (start_enc - encoder_offset) + (ROTATIES * ENC_PPR)
     slow = False
 
+    set_rad(40)
+    time.sleep(0.5)
     set_rad(75)
 
     while True:
         # Controleer of een ander commando binnenkomt
-        mode, speed = read_command()
-        if mode != MODE_AUTO:
-            rem_rad()
-            return
+        #mode, speed = read_command()
+        #if mode != MODE_AUTO:
+        #    rem_rad()
+        #    return
 
         act_enc = read_encoder()
 
@@ -104,11 +106,10 @@ def run_auto():
     time.sleep(1)
     set_rad(0)
 
+    time.sleep(1)
     act_enc = read_encoder()
     print(f"[gripper] auto klaar, rest encoderfout: {end_enc - act_enc}")
-    error_enc = end_enc - act_enc
-
-    next_encoder_start_pose = (act_enc - error_enc)
+    encoder_offset = act_enc - end_enc
 
     # Terug naar IDLE na voltooiing
     write_command(MODE_IDLE)
@@ -133,11 +134,9 @@ def run_idle():
 # =========================
 prev_mode = None
 prev_speed = None
-next_encoder_start_pose = 0
+encoder_offset = 0
 
 print("[gripper] gestart, luistert op", CMD_SHM_PATH)
-
-next_encoder_start_pose = read_encoder()
 
 while True:
     mode, speed = read_command()
@@ -147,7 +146,7 @@ while True:
             run_idle()
         prev_mode = mode
         time.sleep(0.05)
-        next_encoder_start_pose = read_encoder()
+        #encoder_offset = 0
 
     elif mode == MODE_AUTO:
         if prev_mode != MODE_AUTO:
@@ -162,10 +161,11 @@ while True:
         prev_mode = mode
         prev_speed = speed
         time.sleep(0.05)
+        encoder_offset = 0
 
     else:
         # Onbekende mode, stop veilig
         run_idle()
         prev_mode = MODE_IDLE
         time.sleep(0.05)
-        next_encoder_start_pose = read_encoder()
+        encoder_offset = 0
