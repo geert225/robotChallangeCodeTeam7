@@ -44,11 +44,23 @@ def _load_calib_hsv():
     except Exception:
         return np.array([130, 140,  90]), np.array([150, 255, 220])
 
+def _load_calib_yellow():
+    try:
+        with open(_CALIB_PATH) as f:
+            d = json.load(f)
+        return np.array(d["yellow_lower"]), np.array(d["yellow_upper"])
+    except Exception:
+        return np.array([18, 80, 80]), np.array([38, 255, 255])
+
 def _save_calib():
     try:
         with open(_CALIB_PATH, "w") as f:
-            json.dump({"hsv_lower": LOWER_HSV.tolist(),
-                       "hsv_upper": UPPER_HSV.tolist()}, f)
+            json.dump({
+                "hsv_lower":    LOWER_HSV.tolist(),
+                "hsv_upper":    UPPER_HSV.tolist(),
+                "yellow_lower": YELLOW_HSV_LOWER.tolist(),
+                "yellow_upper": YELLOW_HSV_UPPER.tolist(),
+            }, f)
         print("[calib] opgeslagen")
     except Exception as e:
         print(f"[calib] fout: {e}")
@@ -258,8 +270,11 @@ def _read_ultra():
 
 # ---- Obstacle avoidance drempelwaarden (cm) ----
 # Beide sensoren zitten aan de voorzijde.
-ULTRA_SAFE_CM = 15   # hard stop  — blokkeer vooruitrijden
-ULTRA_WARN_CM = 30   # vertraagzone — snelheid lineair afschalen
+ULTRA_SAFE_CM  = 15    # hard stop  — blokkeer vooruitrijden
+ULTRA_WARN_CM  = 30    # vertraagzone — snelheid lineair afschalen
+ULTRA_DODGE_CM = 20    # ontwijkdrempel — start zijdelingse dodge
+ULTRA_DODGE_SPD = 0.6  # [m/s] zijdelingse ontwijksnelheid
+ULTRA_DODGE_VX_SCALE = 0.3  # factor waarmee vx wordt gereduceerd tijdens dodge
 
 def _apply_avoidance(vx: float, vy: float, omega: float):
     """Past vx aan o.b.v. actuele ultrasoonwaarden (alleen AUTO). 0 = geen data → geen ingreep."""
@@ -272,6 +287,48 @@ def _apply_avoidance(vx: float, vy: float, omega: float):
         elif front < ULTRA_WARN_CM:
             vx *= (front - ULTRA_SAFE_CM) / (ULTRA_WARN_CM - ULTRA_SAFE_CM)
     return vx, vy, omega
+
+def _ultra_dodge_vy(target_cx: int | None = None, frame_w: int = 320) -> float:
+    """Bereken een zijdelingse ontwijksnelheid op basis van ultrasoon.
+
+    Wordt gebruikt door DRIVE_TARGET en home_loop wanneer een sensor
+    een obstakel dichter dan ULTRA_DODGE_CM detecteert.
+
+    Richting-logica (prioriteit):
+      1. Target-kant: als target_cx bekend is, wijk af NAAR de kant van
+         het target (zodat de robot niet van het doel wegdraait).
+      2. Sensor-asymmetrie: de sensor die het minst bezet is wijst de
+         vrije kant aan.
+      3. Beide sensoren gelijk bezet: wijk naar rechts (vy < 0).
+
+    Returns:
+      vy_dodge  [m/s], positief = links, negatief = rechts, 0.0 = geen dodge.
+    """
+    s1 = _ultra_d1 if _ultra_d1 > 0 else 9999   # sensor "links"  (d1)
+    s2 = _ultra_d2 if _ultra_d2 > 0 else 9999   # sensor "rechts" (d2)
+    close = min(s1, s2)
+
+    if close > ULTRA_DODGE_CM:
+        return 0.0   # niets in de weg
+
+    # ── Richting bepalen ─────────────────────────────────────
+    # Positief vy = links in robot-frame, negatief = rechts.
+
+    if target_cx is not None:
+        # Target-kant: rij naar de kant waar het target zit
+        target_is_left = target_cx < frame_w // 2
+        vy_dodge = ULTRA_DODGE_SPD if target_is_left else -ULTRA_DODGE_SPD
+    else:
+        # Geen target: ga naar de meest vrije kant (grootste afstand = vrijer)
+        if abs(s1 - s2) > 5:          # duidelijk verschil
+            vy_dodge = ULTRA_DODGE_SPD if s1 > s2 else -ULTRA_DODGE_SPD
+        else:
+            vy_dodge = -ULTRA_DODGE_SPD  # default: rechts
+
+    # ── Schaal op basis van afstand (dichter = harder uitwijken) ─
+    ratio = max(0.0, min(1.0, 1.0 - (close - ULTRA_SAFE_CM) /
+                                     (ULTRA_DODGE_CM - ULTRA_SAFE_CM)))
+    return vy_dodge * (0.4 + 0.6 * ratio)   # minimaal 40% kracht bij rand
 
 # ============================================================
 # OBSTACLE MAP  (positiegebaseerde obstakelskaart)
@@ -319,7 +376,8 @@ ROT_SPEED = 3.0
 # ============================================================
 # AUTO — VISIE PARAMETERS  (uit upgradedBasicBrain)
 # ============================================================
-LOWER_HSV, UPPER_HSV = _load_calib_hsv()
+LOWER_HSV, UPPER_HSV         = _load_calib_hsv()
+YELLOW_HSV_LOWER, YELLOW_HSV_UPPER = _load_calib_yellow()
 MIN_BEKER_AREA  = 50
 MAX_BEKER_AREA  = 300_000
 MIN_OBST_AREA   = 250
@@ -329,7 +387,7 @@ MAX_OMEGA       = 4.0
 STOP_AREA       = 9_000
 SEARCH_OMEGA    = 4.0
 ERROR_DEADBAND  = 0.02
-DRIVE_SPEED     = 2.0
+DRIVE_SPEED     = 0.7
 DRIVE_MIN_OMEGA = 1.5
 MAX_TRACK_DIST  = 80
 
@@ -337,9 +395,7 @@ MAX_TRACK_DIST  = 80
 # geen detectie is (voorkomt dat de robot zoekend gaat draaien bij korte occlussie)
 MAX_TARGET_LOST_FRAMES = 15   # ~300 ms bij 20 fps
 
-# Gele gripper-zone detectie (HSV, OpenCV-schaal: H 0–180)
-YELLOW_HSV_LOWER = np.array([18,  80,  80])
-YELLOW_HSV_UPPER = np.array([38, 255, 255])
+# Gele gripper-zone detectie (HSV, OpenCV-schaal: H 0–180) — geladen uit calibration.json
 MIN_YELLOW_AREA  = 400   # kleinste gele blob die als gripper-vlak telt
 
 # Pickup-event drempelwaarden
@@ -613,7 +669,7 @@ async def _ws_send_text(writer, text: str):
 async def handle_control_ws(reader, writer, request):
     global robot_mode, drive_state, _blink_counter
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
-    global LOWER_HSV, UPPER_HSV
+    global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
     global _vision_debug_step, auto_state
 
@@ -632,6 +688,8 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"gripper_speeds:{gripper_jog_speed},{gripper_auto_speed},{gripper_home_speed}")
     lo, hi = LOWER_HSV.tolist(), UPPER_HSV.tolist()
     await _ws_send_text(writer, f"hsv:{lo[0]},{lo[1]},{lo[2]},{hi[0]},{hi[1]},{hi[2]}")
+    yl, yh = YELLOW_HSV_LOWER.tolist(), YELLOW_HSV_UPPER.tolist()
+    await _ws_send_text(writer, f"yellow_hsv:{yl[0]},{yl[1]},{yl[2]},{yh[0]},{yh[1]},{yh[2]}")
     await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
 
     try:
@@ -715,6 +773,16 @@ async def handle_control_ws(reader, writer, request):
                     UPPER_HSV = np.array(v[3:6])
                     _save_calib()
                     print(f"[brain] HSV → lower={LOWER_HSV.tolist()} upper={UPPER_HSV.tolist()}")
+                except Exception:
+                    pass
+
+            elif msg.startswith("set_yellow_hsv:"):
+                try:
+                    v = [int(x) for x in msg.split(":", 1)[1].split(",")]
+                    YELLOW_HSV_LOWER = np.array(v[0:3])
+                    YELLOW_HSV_UPPER = np.array(v[3:6])
+                    _save_calib()
+                    print(f"[brain] Yellow HSV → lower={YELLOW_HSV_LOWER.tolist()} upper={YELLOW_HSV_UPPER.tolist()}")
                 except Exception:
                     pass
 
@@ -976,9 +1044,13 @@ async def home_loop():
                     omega    = _HOME_K_OMEGA * align_err
                     omega    = max(-_HOME_MAX_OMG * 0.4, min(_HOME_MAX_OMG * 0.4, omega))
                     # Obstakelafstoting: alleen laterale component (vy) toepassen
-                    # zodat de vooruitsnelheid niet geblokkeerd raakt door de regelaar
                     _, vy_rep = obstacle_map.apply_repulsion(px, py, pth, 0.0, 0.0)
                     vy_clamped = max(-_HOME_MAX_SPD * 0.6, min(_HOME_MAX_SPD * 0.6, vy_rep))
+                    # Ultrasoon-dodge (geen target, puur sensor-asymmetrie)
+                    vy_dodge = _ultra_dodge_vy()
+                    if vy_dodge != 0.0:
+                        vx_robot *= ULTRA_DODGE_VX_SCALE
+                        vy_clamped = vy_dodge
                     write_drive_cmd(vx_robot, vy_clamped, omega)
             else:
                 # Fase 3: op positie, draai naar theta=0
@@ -1008,6 +1080,13 @@ async def home_loop():
             # ── Obstakelafstoting op HOME-pad ─────────────────────────────
             vx_robot, vy_robot = obstacle_map.apply_repulsion(
                 px, py, pth, vx_robot, vy_robot)
+
+            # ── Ultrasoon-dodge (puur sensor-asymmetrie, geen target) ─────
+            vy_dodge = _ultra_dodge_vy()
+            if vy_dodge != 0.0:
+                vx_robot *= ULTRA_DODGE_VX_SCALE
+                vy_robot  = vy_dodge
+
             # Begrens totale snelheid na samenvoegen HOME-vector + afstoting
             combined_spd = math.sqrt(vx_robot**2 + vy_robot**2)
             if combined_spd > _HOME_MAX_SPD_REPULSE:
@@ -1019,6 +1098,39 @@ async def home_loop():
 
         await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
         await asyncio.sleep(0.05)   # 20 Hz
+
+# ============================================================
+# AUTO — TO_START transport-modus constanten
+# ============================================================
+_TS_MECANUM_DIST  = 0.40   # [m] onder deze afstand naar volledige mecanum regelaar
+_TS_ALIGN_TH      = 0.15   # [rad] max uitlijningsfout voordat rechtdoor rijden begint (~9°)
+_TS_MAX_CORR_OMG  = 0.8    # [rad/s] max bijstuur-omega tijdens transport-fase
+
+# ── DRIVE_PICKUP rechte-lijn parameters ─────────────────────
+PICKUP_APPROACH_DIST = 0.10   # [m]   afstand rechtdoor bij DRIVE_PICKUP
+PICKUP_APPROACH_SPD  = 0.4    # [m/s] snelheid tijdens rechte-lijn aanrijden
+
+async def _drive_straight(distance: float, speed: float):
+    """Rij een vaste afstand [m] rechtdoor in de huidige heading.
+
+    Gebruikt odometrie voor afstandsmeting. Kleine omega-bijsturing
+    houdt de heading constant. Stopt als de gewenste afstand bereikt is
+    of het maximale aantal iteraties voorbij is.
+    """
+    px0, py0, pth0 = _read_pose()
+    travelled = 0.0
+    DT = 0.05   # 20 Hz
+
+    while travelled < distance:
+        px, py, pth, = _read_pose()
+        travelled = math.sqrt((px - px0)**2 + (py - py0)**2)
+
+        # Houd de starthoek aan — kleine omega-correctie
+        heading_err = _angle_wrap(pth0 - pth)
+        omega = max(-_TS_MAX_CORR_OMG, min(_TS_MAX_CORR_OMG,
+                    _HOME_K_OMEGA * heading_err))
+        write_drive_cmd(speed, 0.0, omega)
+        await asyncio.sleep(DT)
 
 # ============================================================
 # AUTO LOOP  — state machine voor autonoom rijden (20 Hz)
@@ -1087,17 +1199,27 @@ async def auto_loop():
 
             vx, vy, omega = _compute_velocity(_auto_bekers, _auto_frame_w)
             vx, vy, omega = _apply_avoidance(vx, vy, omega)
+
+            # Zijdelingse ultrasoon-dodge — richting afhankelijk van target positie
+            target_cx = _last_target[0] if _last_target is not None else None
+            vy_dodge  = _ultra_dodge_vy(target_cx, _auto_frame_w)
+            if vy_dodge != 0.0:
+                vx  *= ULTRA_DODGE_VX_SCALE   # remmen tijdens zijwaarts uitwijken
+                vy   = vy_dodge               # overschrijf vy volledig
+
             write_drive_cmd(vx, vy, omega)
             await asyncio.sleep(0.05)
 
         # ── DRIVE PICKUP ─────────────────────────────────────────────────────
-        # Rij op exacte opraap-positie onder het pickup-rad.
-        # TODO: verfijn positie met visie/encoders. Dummy: direct naar PICKUP.
+        # Rij een vaste afstand rechtdoor in de huidige heading-richting,
+        # dan direct naar PICKUP.
         elif auto_state == AUTO_DRIVE_PICKUP:
+            print("[auto] DRIVE_PICKUP: rechte lijn rijden")
+            await _drive_straight(PICKUP_APPROACH_DIST, PICKUP_APPROACH_SPD)
             write_drive_cmd(0.0, 0.0, 0.0)
-            print("[auto] DRIVE_PICKUP: op opraap-positie → PICKUP")
+            print("[auto] DRIVE_PICKUP: klaar → PICKUP")
             auto_state = AUTO_PICKUP
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
         # ── PICKUP ───────────────────────────────────────────────────────────
         # Start gripper auto-cyclus en wacht op voltooiing.
@@ -1121,7 +1243,9 @@ async def auto_loop():
             await asyncio.sleep(0.1)
 
         # ── TO START ─────────────────────────────────────────────────────────
-        # Rijd terug naar startpositie (0, 0, θ=0) via holonomic regelaar.
+        # Fase 1 (ver):  draai naar home-richting, rij dan recht vooruit met
+        #                kleine omega-bijsturing, vy=0 (transport-modus).
+        # Fase 2 (dichtbij, < _TS_MECANUM_DIST): volledige mecanum regelaar.
         elif auto_state == AUTO_TO_START:
             px, py, pth = _read_pose()
             dist   = math.sqrt(px*px + py*py)
@@ -1131,7 +1255,33 @@ async def auto_loop():
                 write_drive_cmd(0.0, 0.0, 0.0)
                 print("[auto] TO_START: startpositie bereikt → LOSSEN")
                 auto_state = AUTO_LOSSEN
+
+            elif dist > _TS_MECANUM_DIST:
+                # ── Transport-modus: draai eerst, rij daarna recht ───────────
+                angle_to_home = math.atan2(-py, -px)
+                align_err     = _angle_wrap(angle_to_home - pth)
+
+                if abs(align_err) > _TS_ALIGN_TH:
+                    # Fase 1a: draai op plek naar home-richting
+                    omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG,
+                                _HOME_K_OMEGA * align_err))
+                    write_drive_cmd(0.0, 0.0, omega)
+                else:
+                    # Fase 1b: recht vooruit + kleine kopbijsturing, vy=0
+                    vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+                    omega = max(-_TS_MAX_CORR_OMG, min(_TS_MAX_CORR_OMG,
+                                _HOME_K_OMEGA * align_err))
+                    # Obstakelafstoting + ultrasoon-dodge (sensor-asymmetrie)
+                    _, vy_rep = obstacle_map.apply_repulsion(px, py, pth, 0.0, 0.0)
+                    vy_rep = max(-_HOME_MAX_SPD * 0.4, min(_HOME_MAX_SPD * 0.4, vy_rep))
+                    vy_dodge = _ultra_dodge_vy()
+                    if vy_dodge != 0.0:
+                        vx    *= ULTRA_DODGE_VX_SCALE
+                        vy_rep = vy_dodge
+                    write_drive_cmd(vx, vy_rep, omega)
+
             else:
+                # ── Fase 2: dichtbij — volledige mecanum regelaar ────────────
                 omega_lim = _HOME_MAX_OMG if dist > _HOME_DONE_XY else _HOME_FINAL_OMG
                 omega     = max(-omega_lim, min(omega_lim, _HOME_K_OMEGA * th_err))
 
@@ -1148,7 +1298,11 @@ async def auto_loop():
                 vy_robot = -vx_w * sin_t + vy_w * cos_t
                 vx_robot, vy_robot = obstacle_map.apply_repulsion(
                     px, py, pth, vx_robot, vy_robot)
-
+                # Ultrasoon-dodge ook in mecanum fase (korte afstand)
+                vy_dodge = _ultra_dodge_vy()
+                if vy_dodge != 0.0:
+                    vx_robot *= ULTRA_DODGE_VX_SCALE
+                    vy_robot  = vy_dodge
                 write_drive_cmd(vx_robot, vy_robot, omega)
 
             await asyncio.sleep(0.05)

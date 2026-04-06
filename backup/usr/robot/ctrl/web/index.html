@@ -383,6 +383,42 @@
         <canvas id="hsv-preview" width="240" height="24"></canvas>
         <div id="hsv-save-hint">&#10003; Opgeslagen</div>
       </div>
+
+      <div class="settings-section">
+        <span class="section-label">Gele zone detectie — gripper vlak</span>
+        <div class="color-picker-row">
+          <label>Geel min</label>
+          <input type="color" id="cp-yellow-lower" value="#806000" oninput="yellowPickerChanged()">
+          <span class="cp-hint">donker / min</span>
+        </div>
+        <div class="color-picker-row">
+          <label>Geel max</label>
+          <input type="color" id="cp-yellow-upper" value="#ffff00" oninput="yellowPickerChanged()">
+          <span class="cp-hint">helder / max</span>
+        </div>
+        <div class="hidden">
+          <input type="range" id="sl-yhl" min="0" max="180" value="18">
+          <input type="range" id="sl-ysl" min="0" max="255" value="80">
+          <input type="range" id="sl-yvl" min="0" max="255" value="80">
+          <input type="range" id="sl-yhh" min="0" max="180" value="38">
+          <input type="range" id="sl-ysh" min="0" max="255" value="255">
+          <input type="range" id="sl-yvh" min="0" max="255" value="255">
+        </div>
+        <div class="slider-row" style="margin-top:8px;">
+          <label>Marge tint</label>
+          <input type="range" min="0" max="30" value="10" id="sl-ymargin-h"
+                 oninput="sliderVal('sl-ymargin-h','sv-ymargin-h'); recalculateYellowHSV()">
+          <span class="val" id="sv-ymargin-h">10</span>
+        </div>
+        <div class="slider-row">
+          <label>Marge S/V</label>
+          <input type="range" min="0" max="100" value="40" id="sl-ymargin-sv"
+                 oninput="sliderVal('sl-ymargin-sv','sv-ymargin-sv'); recalculateYellowHSV()">
+          <span class="val" id="sv-ymargin-sv">40</span>
+        </div>
+        <canvas id="yellow-hsv-preview" width="240" height="24"></canvas>
+        <div id="yellow-hsv-save-hint" style="font-size:0.75em;color:#3fb950;margin-top:4px;display:none;">&#10003; Opgeslagen</div>
+      </div>
     </div>
   </div>
 
@@ -570,6 +606,13 @@ ws.onmessage = (e) => {
     document.getElementById("cp-lower").value = hsvToHex(v[0], v[1], v[2]);
     document.getElementById("cp-upper").value = hsvToHex(v[3], v[4], v[5]);
     drawHsvPreview();
+  } else if (d.startsWith("yellow_hsv:")) {
+    const v = d.slice(11).split(",").map(Number);
+    document.getElementById("sl-yhl").value = v[0]; document.getElementById("sl-ysl").value = v[1]; document.getElementById("sl-yvl").value = v[2];
+    document.getElementById("sl-yhh").value = v[3]; document.getElementById("sl-ysh").value = v[4]; document.getElementById("sl-yvh").value = v[5];
+    document.getElementById("cp-yellow-lower").value = hsvToHex(v[0], v[1], v[2]);
+    document.getElementById("cp-yellow-upper").value = hsvToHex(v[3], v[4], v[5]);
+    drawYellowHsvPreview();
   } else if (d.startsWith("auto_state:")) {
     applyAutoState(d.slice(11));
   } else if (d.startsWith("auto_cups:")) {
@@ -813,6 +856,70 @@ function drawHsvPreview() {
   for (let x = 0; x < W; x++) {
     const h = hl + (hh - hl) * (x / W);
     const [r, g, b] = hsvToRgb(h * 2, smid, vmid);  // OpenCV H is 0-180 → multiply by 2 for 0-360
+    ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+    ctx.fillRect(x, 0, 1, H);
+  }
+}
+
+// ── Gele zone calibratie ──────────────────────────────────────
+let _yellowHsvTimer = null;
+function updateYellowHSV() {
+  drawYellowHsvPreview();
+  clearTimeout(_yellowHsvTimer);
+  _yellowHsvTimer = setTimeout(() => {
+    const hl = document.getElementById("sl-yhl").value;
+    const sl = document.getElementById("sl-ysl").value;
+    const vl = document.getElementById("sl-yvl").value;
+    const hh = document.getElementById("sl-yhh").value;
+    const sh = document.getElementById("sl-ysh").value;
+    const vh = document.getElementById("sl-yvh").value;
+    send(`set_yellow_hsv:${hl},${sl},${vl},${hh},${sh},${vh}`);
+    const hint = document.getElementById("yellow-hsv-save-hint");
+    hint.style.display = "block";
+    setTimeout(() => hint.style.display = "none", 1500);
+  }, 400);
+}
+
+function yellowPickerChanged() {
+  const [yhl, ysl, yvl] = rgbToHsv(...hexToRgb(document.getElementById("cp-yellow-lower").value));
+  const [yhh, ysh, yvh] = rgbToHsv(...hexToRgb(document.getElementById("cp-yellow-upper").value));
+  document.getElementById("sl-yhl").value = yhl; document.getElementById("sl-ysl").value = ysl; document.getElementById("sl-yvl").value = yvl;
+  document.getElementById("sl-yhh").value = yhh; document.getElementById("sl-ysh").value = ysh; document.getElementById("sl-yvh").value = yvh;
+  updateYellowHSV();
+}
+
+function recalculateYellowHSV() {
+  // Herbereken HSV-bereik op basis van margin-sliders en color pickers
+  const [yhl_base] = rgbToHsv(...hexToRgb(document.getElementById("cp-yellow-lower").value));
+  const [yhh_base] = rgbToHsv(...hexToRgb(document.getElementById("cp-yellow-upper").value));
+  const mh  = parseInt(document.getElementById("sl-ymargin-h").value);
+  const msv = parseInt(document.getElementById("sl-ymargin-sv").value);
+  const yhl = Math.max(0,   yhl_base - mh);
+  const yhh = Math.min(180, yhh_base + mh);
+  const ysl = Math.max(0,   parseInt(document.getElementById("sl-ysl").value) - msv);
+  const ysh = Math.min(255, parseInt(document.getElementById("sl-ysh").value) + msv);
+  const yvl = Math.max(0,   parseInt(document.getElementById("sl-yvl").value) - msv);
+  const yvh = Math.min(255, parseInt(document.getElementById("sl-yvh").value) + msv);
+  document.getElementById("sl-yhl").value = yhl; document.getElementById("sl-yhh").value = yhh;
+  document.getElementById("sl-ysl").value = ysl; document.getElementById("sl-ysh").value = ysh;
+  document.getElementById("sl-yvl").value = yvl; document.getElementById("sl-yvh").value = yvh;
+  updateYellowHSV();
+}
+
+function drawYellowHsvPreview() {
+  const canvas = document.getElementById("yellow-hsv-preview");
+  const ctx    = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const hl = parseInt(document.getElementById("sl-yhl").value);
+  const hh = parseInt(document.getElementById("sl-yhh").value);
+  const sl = parseInt(document.getElementById("sl-ysl").value) / 255;
+  const sh = parseInt(document.getElementById("sl-ysh").value) / 255;
+  const vl = parseInt(document.getElementById("sl-yvl").value) / 255;
+  const vh = parseInt(document.getElementById("sl-yvh").value) / 255;
+  const smid = (sl + sh) / 2, vmid = (vl + vh) / 2;
+  for (let x = 0; x < W; x++) {
+    const h = hl + (hh - hl) * (x / W);
+    const [r, g, b] = hsvToRgb(h * 2, smid, vmid);
     ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
     ctx.fillRect(x, 0, 1, H);
   }
