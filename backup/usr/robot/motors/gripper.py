@@ -54,6 +54,28 @@ def create_or_open_shm(path, size):
 
 cmd_shm, cmd_fd = create_or_open_shm(CMD_SHM_PATH, CMD_SIZE)
 
+# =========================
+# STATE SHARED MEMORY
+# =========================
+# Schrijft de huidige gripper-toestand terug zodat fullBrain.py
+# weet wanneer de cyclus klaar is.
+#   0 = IDLE  (klaar / gestopt)
+#   1 = BUSY  (auto-cyclus bezig)
+STATE_SHM_PATH = "/dev/shm/gripper_state"
+STATE_FORMAT   = "<i"   # int32
+STATE_SIZE     = struct.calcsize(STATE_FORMAT)
+
+state_shm, state_fd = create_or_open_shm(STATE_SHM_PATH, STATE_SIZE)
+
+GRIPPER_STATE_IDLE = 0
+GRIPPER_STATE_BUSY = 1
+
+def write_state(state: int):
+    fcntl.flock(state_fd.fileno(), fcntl.LOCK_EX)
+    state_shm.seek(0)
+    state_shm.write(struct.pack(STATE_FORMAT, state))
+    fcntl.flock(state_fd.fileno(), fcntl.LOCK_UN)
+
 def read_command():
     fcntl.flock(cmd_fd.fileno(), fcntl.LOCK_SH)
     cmd_shm.seek(0)
@@ -73,29 +95,39 @@ def write_command(mode, speed=0.0):
 # =========================
 
 def run_auto():
-    """Standaard afloop: draait ROTATIES slagen, vertraagt op het einde."""
+    """Standaard afloop: draait ROTATIES slagen, vertraagt op het einde.
+
+    Snelheid wordt gelezen uit de command-SHM (speed veld, 0–100).
+    Fases worden proprotioneel geschaald:
+      opstartfase  = speed * 0.55  (rustig aanlopen)
+      volledig     = speed          (ingesteld setpoint)
+      vertraagfase = speed * 0.40  (afremmen vlak voor einde)
+    """
     global encoder_offset
-    #start_enc = read_encoder()
+
+    _, spd = read_command()
+    speed     = max(10.0, min(100.0, spd))   # begrenzen 10–100
+    spd_start = max(10.0, speed * 0.55)
+    spd_slow  = max(10.0, speed * 0.40)
+    print(f"[gripper] auto: setpoint={speed:.0f}  start={spd_start:.0f}  slow={spd_slow:.0f}")
+
+    write_state(GRIPPER_STATE_BUSY)
+    print("[gripper] state → BUSY")
+
     start_enc = read_encoder()
     end_enc = (start_enc - encoder_offset) + (ROTATIES * ENC_PPR)
     slow = False
 
-    set_rad(40)
+    set_rad(int(spd_start))
     time.sleep(0.5)
-    set_rad(75)
+    set_rad(int(speed))
 
     while True:
-        # Controleer of een ander commando binnenkomt
-        #mode, speed = read_command()
-        #if mode != MODE_AUTO:
-        #    rem_rad()
-        #    return
-
         act_enc = read_encoder()
 
         if not slow and (end_enc - act_enc) < ((ENC_PPR / 3) * 2):
             slow = True
-            set_rad(30)
+            set_rad(int(spd_slow))
 
         if (end_enc - act_enc) < 10:
             break
@@ -110,6 +142,10 @@ def run_auto():
     act_enc = read_encoder()
     print(f"[gripper] auto klaar, rest encoderfout: {end_enc - act_enc}")
     encoder_offset = act_enc - end_enc
+
+    # Terugkoppeling: cyclus klaar
+    write_state(GRIPPER_STATE_IDLE)
+    print("[gripper] state → IDLE")
 
     # Terug naar IDLE na voltooiing
     write_command(MODE_IDLE)

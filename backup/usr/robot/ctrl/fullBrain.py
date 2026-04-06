@@ -81,6 +81,7 @@ AUTO_INIT               = "init"        # in deze state alle waardes initalizere
 AUTO_SEARCH             = "zoeken"      # rondjes draaien tot target gevonden is
 AUTO_DRIVE_TRAGET       = "goTraget"    # rijden naar gevonden target met obstakel ontwijking (als tragert kwijt dan naar zoeken behalve als onder rad dan naar gopickup)
 AUTO_DRIVE_PICKUP       = "goPickup"    # als target (paars beker) onder het rad (geel blok) komt een standaard op pak procudure uitvoeren
+AUTO_CENTER_PICKUP      = "centerPickup"  # draai robot zodat beker perfect gecentreerd staat voordat pickup begint
 AUTO_PICKUP             = "pickup"      # opraap routine starten (optellen aantal bekers)
 AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden -> als robot x aantal bekers opgepakt heeft
 AUTO_LOSSEN             = "lossen"      # laad klep open zetten
@@ -142,6 +143,23 @@ GRIPPER_FMT      = "<id"
 GRIPPER_SIZE     = struct.calcsize(GRIPPER_FMT)
 
 gripper_shm, gripper_fh = _create_or_open_shm(GRIPPER_SHM_PATH, GRIPPER_SIZE)
+
+# Gripper state terugkoppeling (geschreven door gripper.py)
+#   0 = IDLE (klaar), 1 = BUSY (bezig)
+_GRIPPER_STATE_SHM_PATH = "/dev/shm/gripper_state"
+_GRIPPER_STATE_FMT      = "<i"
+_GRIPPER_STATE_SIZE     = struct.calcsize(_GRIPPER_STATE_FMT)
+
+gripper_state_shm, gripper_state_fh = _create_or_open_shm(
+    _GRIPPER_STATE_SHM_PATH, _GRIPPER_STATE_SIZE)
+
+def _read_gripper_state() -> int:
+    """Leest de toestand van gripper.py: 0=IDLE, 1=BUSY."""
+    fcntl.flock(gripper_state_fh.fileno(), fcntl.LOCK_SH)
+    gripper_state_shm.seek(0)
+    raw = gripper_state_shm.read(_GRIPPER_STATE_SIZE)
+    fcntl.flock(gripper_state_fh.fileno(), fcntl.LOCK_UN)
+    return struct.unpack(_GRIPPER_STATE_FMT, raw)[0]
 
 # Gripper snelheden (aanpasbaar via web, 0–100)
 gripper_jog_speed  = 30   # handmatige jog
@@ -1210,11 +1228,11 @@ async def auto_loop():
         # _pickup_ready (vision event) → DRIVE_PICKUP.
         # Beker kwijt buiten tolerantie → SEARCH.
         elif auto_state == AUTO_DRIVE_TRAGET:
-            # Pickup-event heeft prioriteit (ook als bekers leeg is door occlusie)
-            if _pickup_ready:
+            # Zodra de beker het gele vlak raakt → stop en centreer eerst
+            if _cup_touching_gripper:
                 write_drive_cmd(0.0, 0.0, 0.0)
-                print("[auto] DRIVE_TARGET: pickup-event → DRIVE_PICKUP")
-                auto_state = AUTO_DRIVE_PICKUP
+                print("[auto] DRIVE_TARGET: beker raakt gripper-zone → CENTER_PICKUP")
+                auto_state = AUTO_CENTER_PICKUP
                 await asyncio.sleep(0.05)
                 continue
 
@@ -1238,6 +1256,30 @@ async def auto_loop():
             write_drive_cmd(vx, vy, omega)
             await asyncio.sleep(0.05)
 
+        # ── CENTER PICKUP ─────────────────────────────────────────────────────
+        # Draai op de plek totdat de beker horizontaal gecentreerd staat in
+        # het camerabeeld. Daarna pas verder naar DRIVE_PICKUP.
+        elif auto_state == AUTO_CENTER_PICKUP:
+            if _auto_bekers:
+                best = max(_auto_bekers, key=lambda b: b[4])
+                bx, by, bw, bh, _ = best
+                cx    = bx + bw // 2
+                error = (cx - _auto_frame_w // 2) / (_auto_frame_w // 2)
+                if abs(error) < ERROR_DEADBAND:
+                    write_drive_cmd(0.0, 0.0, 0.0)
+                    print("[auto] CENTER_PICKUP: beker gecentreerd → DRIVE_PICKUP")
+                    auto_state = AUTO_DRIVE_PICKUP
+                else:
+                    # Alleen draaien, niet rijden
+                    omega = max(-MAX_OMEGA * 0.5, min(MAX_OMEGA * 0.5, -K_OMEGA * error))
+                    write_drive_cmd(0.0, 0.0, omega)
+            else:
+                # Beker tijdelijk niet zichtbaar → ga toch verder
+                write_drive_cmd(0.0, 0.0, 0.0)
+                print("[auto] CENTER_PICKUP: beker niet zichtbaar → DRIVE_PICKUP")
+                auto_state = AUTO_DRIVE_PICKUP
+            await asyncio.sleep(0.05)
+
         # ── DRIVE PICKUP ─────────────────────────────────────────────────────
         # Rij een vaste afstand rechtdoor in de huidige heading-richting,
         # dan direct naar PICKUP.
@@ -1250,13 +1292,24 @@ async def auto_loop():
             await asyncio.sleep(0.1)
 
         # ── PICKUP ───────────────────────────────────────────────────────────
-        # Start gripper auto-cyclus en wacht op voltooiing.
-        # TODO: gebruik gripper-encoder feedback i.p.v. vaste sleep.
+        # Start gripper auto-cyclus en wacht tot het rad klaar is (encoder).
+        # Veiligheids-timeout van 5 seconden als encoder niet reageert.
         elif auto_state == AUTO_PICKUP:
             write_drive_cmd(0.0, 0.0, 0.0)
-            write_gripper_cmd(GRIPPER_AUTO_CMD)
-            print("[auto] PICKUP: gripper gestart")
-            await asyncio.sleep(2.0)   # TODO: wacht op encoder-feedback
+            write_gripper_cmd(GRIPPER_AUTO_CMD, gripper_auto_speed)
+            print(f"[auto] PICKUP: gripper gestart (speed={gripper_auto_speed}), wacht op state=IDLE van gripper.py")
+
+            PICKUP_TIMEOUT = 10.0   # veiligheids-timeout [s]
+            _t_start = time.time()
+            while True:
+                await asyncio.sleep(0.05)
+                if _read_gripper_state() == 0:   # 0 = IDLE → cyclus klaar
+                    print("[auto] PICKUP: gripper meldt IDLE → klaar")
+                    break
+                if time.time() - _t_start >= PICKUP_TIMEOUT:
+                    print("[auto] PICKUP: timeout, gripper.py reageerde niet → doorgaan")
+                    break
+
             write_gripper_cmd(GRIPPER_IDLE)
 
             _auto_cup_count += 1
