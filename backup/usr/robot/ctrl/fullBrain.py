@@ -410,6 +410,9 @@ _target_lost_n = 0      # frames achtereen zonder detectie
 _yellow_zone   = None   # (x, y, w, h) van grootste gele blob, of None
 _pickup_ready  = False  # True wanneer beker voldoende overlapt met geel vlak
 
+_cup_detection_enabled = True  # instelbaar via web (set_cup_detection:1/0)
+_cup_touching_gripper  = False  # True zodra cup-bbox het gele vlak raakt (reset bij INIT)
+
 
 def _classify_zone(cx, frame_w):
     if cx < frame_w * 0.33:
@@ -423,6 +426,9 @@ def _compute_velocity(bekers, frame_w):
     global _last_dir_pos, _last_target, _target_lost_n
 
     if not bekers:
+        if _cup_touching_gripper:
+            # Beker is al onder de gripper-zone — stop en wacht op pickup-event
+            return 0.0, 0.0, 0.0
         _target_lost_n += 1
         if _last_target is not None and _target_lost_n <= MAX_TARGET_LOST_FRAMES:
             # Blijf sturen op laatste bekende positie (korte occlussie)
@@ -472,7 +478,7 @@ BLINK_TICKS    = 25   # ~500 ms bij 20 ms sleep
 
 async def vision_loop():
     global latest_jpeg, _blink_counter, _auto_bekers, _auto_frame_w
-    global _yellow_zone, _pickup_ready
+    global _yellow_zone, _pickup_ready, _cup_touching_gripper
 
     while True:
         # frame lezen
@@ -495,14 +501,15 @@ async def vision_loop():
         mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         bekers = []
-        for c in contours:
-            area = cv2.contourArea(c)
-            if MIN_BEKER_AREA < area < MAX_BEKER_AREA:
-                x, y, w, h = cv2.boundingRect(c)
-                bekers.append((x, y, w, h, area))
-                cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        if _cup_detection_enabled:
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours:
+                area = cv2.contourArea(c)
+                if MIN_BEKER_AREA < area < MAX_BEKER_AREA:
+                    x, y, w, h = cv2.boundingRect(c)
+                    bekers.append((x, y, w, h, area))
+                    cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
         cups_bgr = frame_bgr.copy()  # stap "bekers": na cup-boxes, vóór gele zone
 
@@ -552,6 +559,20 @@ async def vision_loop():
                                     (yx + 2, yy - 4),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                                     (0, 80, 255), 1)
+
+        # ── Cup-in-gripper-zone detectie ─────────────────────────────────────
+        # Eenmaal True blijft True tot reset in AUTO_INIT (beker nooit kwijt).
+        if not _cup_touching_gripper and _yellow_zone is not None and bekers:
+            yx, yy, yw, yh = _yellow_zone
+            for bx, by, bw, bh, _ in bekers:
+                ix1 = max(bx, yx); iy1 = max(by, yy)
+                ix2 = min(bx + bw, yx + yw); iy2 = min(by + bh, yy + yh)
+                if ix2 > ix1 and iy2 > iy1:   # elke aanraking telt
+                    _cup_touching_gripper = True
+                    break
+        if _cup_touching_gripper:
+            cv2.putText(frame_bgr, "CAPTURED", (5, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
         # obstakeldetectie (onderste helft)
         #roi   = frame_bgr[int(frame_h * 0.55):frame_h, :]
@@ -671,7 +692,7 @@ async def handle_control_ws(reader, writer, request):
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
-    global _vision_debug_step, auto_state
+    global _vision_debug_step, auto_state, _cup_detection_enabled
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -691,6 +712,7 @@ async def handle_control_ws(reader, writer, request):
     yl, yh = YELLOW_HSV_LOWER.tolist(), YELLOW_HSV_UPPER.tolist()
     await _ws_send_text(writer, f"yellow_hsv:{yl[0]},{yl[1]},{yl[2]},{yh[0]},{yh[1]},{yh[2]}")
     await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
+    await _ws_send_text(writer, f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
 
     try:
         while True:
@@ -785,6 +807,11 @@ async def handle_control_ws(reader, writer, request):
                     print(f"[brain] Yellow HSV → lower={YELLOW_HSV_LOWER.tolist()} upper={YELLOW_HSV_UPPER.tolist()}")
                 except Exception:
                     pass
+
+            elif msg.startswith("set_cup_detection:"):
+                _cup_detection_enabled = msg.split(":", 1)[1].strip() == "1"
+                print(f"[brain] cup detectie → {'aan' if _cup_detection_enabled else 'uit'}")
+                await _broadcast(f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
 
             # ---- RIJDEN (alleen in MANUAL) ----
             elif robot_mode == MODE_MANUAL:
@@ -1137,7 +1164,7 @@ async def _drive_straight(distance: float, speed: float):
 # _auto_bekers en _auto_frame_w worden gevuld door vision_loop.
 # ============================================================
 async def auto_loop():
-    global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode
+    global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
     _prev_state = None
 
     while True:
@@ -1162,6 +1189,7 @@ async def auto_loop():
         elif auto_state == AUTO_INIT:
             write_drive_cmd(0.0, 0.0, 0.0)
             _auto_cup_count = 0
+            _cup_touching_gripper = False
             _klep_dicht()
             print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
             auto_state = AUTO_SEARCH
@@ -1190,7 +1218,7 @@ async def auto_loop():
                 await asyncio.sleep(0.05)
                 continue
 
-            if not _auto_bekers and _last_target is None:
+            if not _auto_bekers and _last_target is None and not _cup_touching_gripper:
                 # Target écht kwijt (persistent tracking uitgeput)
                 print("[auto] DRIVE_TARGET: target kwijt → SEARCH")
                 auto_state = AUTO_SEARCH
@@ -1239,6 +1267,7 @@ async def auto_loop():
                 print(f"[auto] PICKUP: {AUTO_MAX_CUPS} bekers vol → TO_START")
                 auto_state = AUTO_TO_START
             else:
+                _cup_touching_gripper = False   # reset voor volgende beker
                 auto_state = AUTO_SEARCH
             await asyncio.sleep(0.1)
 
