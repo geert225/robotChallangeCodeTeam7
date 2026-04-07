@@ -451,6 +451,10 @@ PICKUP_MIN_CUP_AREA  = 2500  # beker moet groot genoeg zijn (dichtbij) om event 
 # Bekers waarvan het middelpunt boven deze lijn valt worden genegeerd.
 CUP_IGNORE_TOP_PCT = 20   # instelbaar via web (set_ignore_top_pct:XX)
 
+# Onderkant-trigger: beker wordt als "gevangen" beschouwd zodra de onderkant
+# van de bbox deze lijn bereikt (% van frame hoogte vanaf bovenkant).
+CUP_BOTTOM_TRIGGER_PCT = 85  # instelbaar via web (set_bottom_trigger_pct:XX)
+
 _last_dir_pos  = False
 _last_target   = None   # (cx, cy) van vorige frame
 _target_lost_n = 0      # frames achtereen zonder detectie
@@ -537,6 +541,12 @@ async def vision_loop():
         finally:
             fcntl.flock(vision_fh.fileno(), fcntl.LOCK_UN)
 
+        # Wacht op geldig frame (camera.py heeft nog niet geschreven bij opstarten)
+        expected = frame_w * frame_h * CHANNELS
+        if frame_w == 0 or frame_h == 0 or len(frame_bytes) < expected:
+            await asyncio.sleep(0.05)
+            continue
+
         frame     = np.frombuffer(frame_bytes, dtype=np.uint8).reshape((frame_h, frame_w, CHANNELS))
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # camera geeft RGB, omzetten naar BGR voor CV
 
@@ -595,39 +605,38 @@ async def vision_loop():
             cv2.putText(frame_bgr, "GRIPPER", (yx + 2, yy - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 220, 220), 1)
 
-        # ── Pickup-event: overlap beker × gele zone ───────────────────────────
-        _pickup_ready = False
-        if _yellow_zone is not None and bekers:
-            best_cup = max(bekers, key=lambda b: b[4])
-            bx, by, bw, bh, barea = best_cup
-            if barea >= PICKUP_MIN_CUP_AREA:
-                yx, yy, yw, yh = _yellow_zone
-                ix1 = max(bx, yx);      iy1 = max(by, yy)
-                ix2 = min(bx + bw, yx + yw); iy2 = min(by + bh, yy + yh)
-                if ix2 > ix1 and iy2 > iy1:
-                    overlap = (ix2 - ix1) * (iy2 - iy1)
-                    ratio   = overlap / (bw * bh)
-                    if ratio >= PICKUP_OVERLAP_RATIO:
-                        _pickup_ready = True
-                        # visuele feedback: gele rand rood + label
-                        cv2.rectangle(frame_bgr, (yx, yy), (yx + yw, yy + yh),
-                                      (0, 0, 255), 3)
-                        cv2.putText(frame_bgr,
-                                    f"PICKUP READY {ratio*100:.0f}%",
-                                    (yx + 2, yy - 4),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                                    (0, 80, 255), 1)
+        # ── Bodem-trigger: beker onderkant bereikt trigger-lijn ──────────────
+        # Kies de gevolgde beker (dichtstbij _last_target, anders grootste).
+        _trigger_y = int(frame_h * CUP_BOTTOM_TRIGGER_PCT / 100)
 
-        # ── Cup-in-gripper-zone detectie ─────────────────────────────────────
-        # Eenmaal True blijft True tot reset in AUTO_INIT (beker nooit kwijt).
-        if not _cup_touching_gripper and _yellow_zone is not None and bekers:
-            yx, yy, yw, yh = _yellow_zone
-            for bx, by, bw, bh, _ in bekers:
-                ix1 = max(bx, yx); iy1 = max(by, yy)
-                ix2 = min(bx + bw, yx + yw); iy2 = min(by + bh, yy + yh)
-                if ix2 > ix1 and iy2 > iy1:   # elke aanraking telt
-                    _cup_touching_gripper = True
-                    break
+        # Teken trigger-lijn (rood stippel)
+        for xi in range(0, frame_w, 12):
+            cv2.line(frame_bgr, (xi, _trigger_y), (min(xi + 6, frame_w), _trigger_y),
+                     (0, 0, 255), 1)
+
+        _pickup_ready = False
+        if bekers:
+            if _last_target is not None:
+                tracked = min(bekers,
+                              key=lambda b: (b[0] + b[2]//2 - _last_target[0])**2
+                                          + (b[1] + b[3]//2 - _last_target[1])**2)
+            else:
+                tracked = max(bekers, key=lambda b: b[4])
+
+            bx, by, bw, bh, barea = tracked
+            cup_bottom = by + bh   # onderkant bbox in pixels
+
+            if cup_bottom >= _trigger_y:
+                _pickup_ready = True
+                # visuele feedback: rode bbox + label
+                cv2.rectangle(frame_bgr, (bx, by), (bx + bw, by + bh), (0, 0, 255), 3)
+                cv2.putText(frame_bgr, "PICKUP READY",
+                            (bx, by - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 80, 255), 1)
+
+        # ── Cup captured (eenmaal True, reset in AUTO_INIT) ──────────────────
+        if not _cup_touching_gripper and _pickup_ready:
+            _cup_touching_gripper = True
         if _cup_touching_gripper:
             cv2.putText(frame_bgr, "CAPTURED", (5, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
@@ -750,7 +759,8 @@ async def handle_control_ws(reader, writer, request):
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
-    global _vision_debug_step, auto_state, _cup_detection_enabled, CUP_IGNORE_TOP_PCT
+    global _vision_debug_step, auto_state, _cup_detection_enabled
+    global CUP_IGNORE_TOP_PCT, CUP_BOTTOM_TRIGGER_PCT
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -772,6 +782,7 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
     await _ws_send_text(writer, f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
     await _ws_send_text(writer, f"ignore_top_pct:{CUP_IGNORE_TOP_PCT}")
+    await _ws_send_text(writer, f"bottom_trigger_pct:{CUP_BOTTOM_TRIGGER_PCT}")
 
     try:
         while True:
@@ -880,6 +891,14 @@ async def handle_control_ws(reader, writer, request):
                 except ValueError:
                     pass
 
+            elif msg.startswith("set_bottom_trigger_pct:"):
+                try:
+                    CUP_BOTTOM_TRIGGER_PCT = max(50, min(100, int(msg.split(":", 1)[1])))
+                    print(f"[brain] bodem-trigger → {CUP_BOTTOM_TRIGGER_PCT}%")
+                    await _broadcast(f"bottom_trigger_pct:{CUP_BOTTOM_TRIGGER_PCT}")
+                except ValueError:
+                    pass
+
             # ---- LAADKLEP (manual bediening, werkt in alle modi) ----
             elif msg == "klep_open":
                 _klep_open()
@@ -919,7 +938,7 @@ async def handle_control_ws(reader, writer, request):
                     write_gripper_cmd(GRIPPER_IDLE)
 
                 elif msg == "gripper_auto":
-                    write_gripper_cmd(GRIPPER_AUTO_CMD)
+                    write_gripper_cmd(GRIPPER_AUTO_CMD, gripper_auto_speed)
                     print("[brain] gripper AUTO gestart")
 
                 write_drive_cmd(drive_state["vx"], drive_state["vy"], drive_state["omega"])

@@ -384,6 +384,12 @@
                  oninput="sliderVal('sl-ignore-top','sv-ignore-top'); sendIgnoreTopPct()">
           <span class="val" id="sv-ignore-top">20</span><span style="font-size:0.75em;color:#8b949e;">%</span>
         </div>
+        <div class="slider-row">
+          <label>Pickup trigger</label>
+          <input type="range" min="50" max="100" value="85" id="sl-bottom-trigger"
+                 oninput="sliderVal('sl-bottom-trigger','sv-bottom-trigger'); sendBottomTriggerPct()">
+          <span class="val" id="sv-bottom-trigger">85</span><span style="font-size:0.75em;color:#8b949e;">%</span>
+        </div>
       </div>
 
       <div class="settings-section">
@@ -654,6 +660,9 @@ function toggleCupDetection(enabled) {
 function sendIgnoreTopPct() {
   send('set_ignore_top_pct:' + document.getElementById("sl-ignore-top").value);
 }
+function sendBottomTriggerPct() {
+  send('set_bottom_trigger_pct:' + document.getElementById("sl-bottom-trigger").value);
+}
 
 function recalculateHSV() {
   if (colorSamples.length === 0) return;
@@ -728,6 +737,8 @@ ws.onmessage = (e) => {
     document.getElementById("cb-cup-detection").checked = d.slice(14) === "1";
   } else if (d.startsWith("ignore_top_pct:")) {
     setSlider("sl-ignore-top", "sv-ignore-top", parseInt(d.slice(15)));
+  } else if (d.startsWith("bottom_trigger_pct:")) {
+    setSlider("sl-bottom-trigger", "sv-bottom-trigger", parseInt(d.slice(19)));
   } else if (d.startsWith("klep:")) {
     applyKlep(d.slice(5));
   } else if (d.startsWith("obstacles:")) {
