@@ -93,7 +93,7 @@ auto_state              = AUTO_IDLE
 _auto_bekers: list  = []    # laatste beker-detecties (gevuld door vision_loop)
 _auto_frame_w: int  = 320   # frame breedte (gevuld door vision_loop)
 _auto_cup_count: int = 0    # aantal opgepakte bekers in huidige cyclus
-AUTO_MAX_CUPS        = 3    # aantal bekers voordat robot terugrijdt naar start
+AUTO_MAX_CUPS        = 3    # instelbaar via web (set_max_cups:N), min 1 max 10
 
 # ============================================================
 # SHARED MEMORY — SERVO (laadklep)
@@ -476,49 +476,29 @@ def _classify_zone(cx, frame_w):
 
 
 def _compute_velocity(bekers, frame_w):
+    """Niet langer gebruikt door auto_loop — staat nog in voor backward compat."""
     global _last_dir_pos, _last_target, _target_lost_n
-
     if not bekers:
-        if _cup_touching_gripper:
-            # Beker is al onder de gripper-zone — stop en wacht op pickup-event
-            return 0.0, 0.0, 0.0
         _target_lost_n += 1
         if _last_target is not None and _target_lost_n <= MAX_TARGET_LOST_FRAMES:
-            # Blijf sturen op laatste bekende positie (korte occlussie)
-            cx = _last_target[0]
+            cx    = _last_target[0]
             error = (cx - frame_w // 2) / (frame_w // 2)
             omega = 0.0 if abs(error) < ERROR_DEADBAND else max(-MAX_OMEGA, min(MAX_OMEGA, -K_OMEGA * error))
-            vx    = DRIVE_SPEED if abs(omega) < DRIVE_MIN_OMEGA else 0.0
-            return vx, 0.0, omega
-        # Target écht kwijt — start opnieuw zoeken
+            return DRIVE_SPEED, 0.0, omega
         _last_target = None
         return (0.0, 0.0, -SEARCH_OMEGA) if _last_dir_pos else (0.0, 0.0, SEARCH_OMEGA)
-
     _target_lost_n = 0
-
-    # Kies beste beker:
-    #   - Als er al een target is (locked): altijd de dichtstbijzijnde beker kiezen
-    #     zodat de robot niet switcht naar een andere beker als er meerdere in beeld zijn.
-    #   - Nog geen target: kies de grootste beker als beginpunt.
     if _last_target is not None:
-        best = min(bekers, key=lambda b: (b[0] + b[2]//2 - _last_target[0])**2
-                                       + (b[1] + b[3]//2 - _last_target[1])**2)
+        best = min(bekers, key=lambda b: (b[0]+b[2]//2-_last_target[0])**2+(b[1]+b[3]//2-_last_target[1])**2)
     else:
         best = max(bekers, key=lambda b: b[4])
-
-    x, y, w, h, area = best
+    x, y, w, h, _ = best
     cx = x + w // 2
     _last_target  = (cx, y + h // 2)
     _last_dir_pos = cx >= frame_w // 2
-
     error = (cx - frame_w // 2) / (frame_w // 2)
     omega = 0.0 if abs(error) < ERROR_DEADBAND else max(-MAX_OMEGA, min(MAX_OMEGA, -K_OMEGA * error))
-    vx    = DRIVE_SPEED if abs(omega) < DRIVE_MIN_OMEGA else 0.0
-
-    if area > STOP_AREA:
-        return 0.0, 0.0, 0.0
-
-    return vx, 0.0, omega
+    return DRIVE_SPEED, 0.0, omega
 
 # ============================================================
 # VISION LOOP  (altijd actief, schrijft rij+LED-commando afhankelijk van modus)
@@ -760,7 +740,7 @@ async def handle_control_ws(reader, writer, request):
     global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
     global _vision_debug_step, auto_state, _cup_detection_enabled
-    global CUP_IGNORE_TOP_PCT, CUP_BOTTOM_TRIGGER_PCT
+    global CUP_IGNORE_TOP_PCT, CUP_BOTTOM_TRIGGER_PCT, AUTO_MAX_CUPS
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -783,6 +763,7 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
     await _ws_send_text(writer, f"ignore_top_pct:{CUP_IGNORE_TOP_PCT}")
     await _ws_send_text(writer, f"bottom_trigger_pct:{CUP_BOTTOM_TRIGGER_PCT}")
+    await _ws_send_text(writer, f"max_cups:{AUTO_MAX_CUPS}")
 
     try:
         while True:
@@ -896,6 +877,14 @@ async def handle_control_ws(reader, writer, request):
                     CUP_BOTTOM_TRIGGER_PCT = max(50, min(100, int(msg.split(":", 1)[1])))
                     print(f"[brain] bodem-trigger → {CUP_BOTTOM_TRIGGER_PCT}%")
                     await _broadcast(f"bottom_trigger_pct:{CUP_BOTTOM_TRIGGER_PCT}")
+                except ValueError:
+                    pass
+
+            elif msg.startswith("set_max_cups:"):
+                try:
+                    AUTO_MAX_CUPS = max(1, min(10, int(msg.split(":", 1)[1])))
+                    print(f"[brain] max bekers → {AUTO_MAX_CUPS}")
+                    await _broadcast(f"max_cups:{AUTO_MAX_CUPS}")
                 except ValueError:
                     pass
 
@@ -1096,20 +1085,25 @@ async def obstacle_map_loop():
 # ============================================================
 
 # ── Navigatiestrategie ───────────────────────────────────────────────────────
-# "holonomic" : rij in elke richting (mecanum, tegelijk draaien)
-# "forward"   : eerst draaien, dan rechtdoor rijden, dan draaien naar theta=0
-home_strategy = "holonomic"
+# "forward" (default): fase 1 = draaien naar home-richting,
+#                      fase 2 = recht vooruit rijden,
+#                      fase 3 = draaien naar theta=0
+# "holonomic": rijden + draaien tegelijk (kan oscilleren bij hoge gains)
+home_strategy = "forward"
 
-_FORWARD_ALIGN_TH = 0.12   # rad (~7°): acceptabele kopfout voordat vooruitrijden begint
+# ── Drempel: kopfout mag maximaal dit zijn voordat rechtdoor rijden begint
+_FORWARD_ALIGN_TH  = 0.15   # rad (~9°)
+# ── Deadband omega: kleine hoekfouten worden genegeerd (vermindert oscillatie)
+_HOME_OMEGA_DEADBAND = 0.05  # rad
 
-# ── P-regelaar instelling ────────────────────────────────────────────────────
-_HOME_K_POS    = 1.2   # versterkingsfactor positie [m/s per m fout]
-_HOME_K_OMEGA  = 4.0   # versterkingsfactor heading [rad/s per rad fout]
-_HOME_MAX_SPD  = 0.8   # maximale rijsnelheid [m/s]
-_HOME_MAX_OMG  = 2.5   # maximale rotatiesnelheid tijdens rijfase [rad/s]
-_HOME_FINAL_OMG = 0.8  # maximale rotatiesnelheid tijdens eindcorrectie [rad/s]
-_HOME_DONE_XY  = 0.12  # aankomstdrempel positie [m]  (12 cm)
-_HOME_DONE_TH  = 0.08  # aankomstdrempel heading [rad] (~5°)
+# ── P-regelaar instelling (laag gehouden om oscillaties te vermijden) ────────
+_HOME_K_POS    = 0.6   # [m/s per m]   positiefout → rijsnelheid
+_HOME_K_OMEGA  = 1.5   # [rad/s per rad] hoekfout → rotatiesnelheid
+_HOME_MAX_SPD  = 0.5   # maximale rijsnelheid [m/s]
+_HOME_MAX_OMG  = 1.2   # maximale rotatiesnelheid [rad/s]
+_HOME_FINAL_OMG = 0.5  # maximale rotatiesnelheid eindcorrectie [rad/s]
+_HOME_DONE_XY  = 0.15  # aankomstdrempel positie [m]  (15 cm)
+_HOME_DONE_TH  = 0.10  # aankomstdrempel heading [rad] (~6°)
 
 def _angle_wrap(a: float) -> float:
     """Brengt hoek terug naar [-π, π]."""
@@ -1125,15 +1119,28 @@ async def _broadcast(msg: str):
 
 async def home_loop():
     global robot_mode, drive_state, _blink_counter
+    _was_home = False
 
     while True:
         if robot_mode != MODE_HOME:
+            _was_home = False
             await asyncio.sleep(0.05)
             continue
 
         px, py, pth = _read_pose()
         dist   = math.sqrt(px*px + py*py)
         th_err = _angle_wrap(-pth)   # fout t.o.v. theta=0
+
+        # ── Diagnostiek bij eerste tick in HOME-modus ─────────────────────
+        if not _was_home:
+            _was_home = True
+            print(f"[home] START — pose: x={px:.3f} y={py:.3f} θ={math.degrees(pth):.1f}° dist={dist:.3f}m")
+
+        # ── Guard: als pose (0,0,0) is, is odometrie waarschijnlijk niet actief ─
+        if dist < 0.001 and abs(pth) < 0.001:
+            print("[home] WAARSCHUWING: pose is (0,0,0) — odometrie actief?")
+            await asyncio.sleep(0.5)
+            continue
 
         # ── Klaar? (positie EN heading binnen drempel) ────────────────────
         if dist < _HOME_DONE_XY and abs(th_err) < _HOME_DONE_TH:
@@ -1148,88 +1155,48 @@ async def home_loop():
             await asyncio.sleep(0.05)
             continue
 
-        if home_strategy == "forward":
-            # ── Strategie FORWARD: draaien → rechtdoor → draaien ─────────
-            if dist > _HOME_DONE_XY:
-                # Hoek vanuit huidige positie richting oorsprong (wereldframe)
-                angle_to_home = math.atan2(-py, -px)
-                align_err = _angle_wrap(angle_to_home - pth)
+        # ── Fase 1: draai naar home-richting ─────────────────────────────────
+        angle_to_home = math.atan2(-py, -px)   # richting van huidige pos naar (0,0)
+        align_err     = _angle_wrap(angle_to_home - pth)
 
-                if abs(align_err) > _FORWARD_ALIGN_TH:
-                    # Fase 1: draai om oorsprong in te richten, niet rijden
-                    omega = _HOME_K_OMEGA * align_err
-                    omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
-                    write_drive_cmd(0.0, 0.0, omega)
-                else:
-                    # Fase 2: rechtdoor rijden + kleine kopscorrectie + obstakelafstoting
-                    vx_robot = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
-                    omega    = _HOME_K_OMEGA * align_err
-                    omega    = max(-_HOME_MAX_OMG * 0.4, min(_HOME_MAX_OMG * 0.4, omega))
-                    # Obstakelafstoting: alleen laterale component (vy) toepassen
-                    _, vy_rep = obstacle_map.apply_repulsion(px, py, pth, 0.0, 0.0)
-                    vy_clamped = max(-_HOME_MAX_SPD * 0.6, min(_HOME_MAX_SPD * 0.6, vy_rep))
-                    # Ultrasoon-dodge (geen target, puur sensor-asymmetrie)
-                    vy_dodge = _ultra_dodge_vy()
-                    if vy_dodge != 0.0:
-                        vx_robot *= ULTRA_DODGE_VX_SCALE
-                        vy_clamped = vy_dodge
-                    write_drive_cmd(vx_robot, vy_clamped, omega)
+        if dist > _HOME_DONE_XY and abs(align_err) > _FORWARD_ALIGN_TH:
+            omega = _HOME_K_OMEGA * align_err
+            if abs(align_err) < _HOME_OMEGA_DEADBAND:
+                omega = 0.0
+            omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
+            write_drive_cmd(0.0, 0.0, omega)
+
+        # ── Fase 2: recht vooruit rijden naar (0,0) ───────────────────────────
+        elif dist > _HOME_DONE_XY:
+            vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+            # Kleine kopbijsturing, zacht begrensd
+            omega = _HOME_K_OMEGA * align_err
+            if abs(align_err) < _HOME_OMEGA_DEADBAND:
+                omega = 0.0
+            omega = max(-_HOME_MAX_OMG * 0.3, min(_HOME_MAX_OMG * 0.3, omega))
+            write_drive_cmd(vx, 0.0, omega)
+
+        # ── Fase 3: op positie, corrigeer heading naar theta=0 ───────────────
+        else:
+            if abs(th_err) < _HOME_OMEGA_DEADBAND:
+                omega = 0.0
             else:
-                # Fase 3: op positie, draai naar theta=0
                 omega = _HOME_K_OMEGA * th_err
                 omega = max(-_HOME_FINAL_OMG, min(_HOME_FINAL_OMG, omega))
-                write_drive_cmd(0.0, 0.0, omega)
-
-        else:
-            # ── Strategie HOLONOMIC: rij in elke richting tegelijk ────────
-            omega_lim = _HOME_MAX_OMG if dist > _HOME_DONE_XY else _HOME_FINAL_OMG
-            omega = _HOME_K_OMEGA * th_err
-            omega = max(-omega_lim, min(omega_lim, omega))
-
-            vx_w = _HOME_K_POS * (-px)
-            vy_w = _HOME_K_POS * (-py)
-            spd  = math.sqrt(vx_w*vx_w + vy_w*vy_w)
-            max_spd = _HOME_MAX_SPD if dist > _HOME_DONE_XY else min(_HOME_MAX_SPD, dist * 2.0)
-            if spd > max_spd:
-                vx_w *= max_spd / spd
-                vy_w *= max_spd / spd
-
-            cos_t    = math.cos(pth)
-            sin_t    = math.sin(pth)
-            vx_robot =  vx_w * cos_t + vy_w * sin_t
-            vy_robot = -vx_w * sin_t + vy_w * cos_t
-
-            # ── Obstakelafstoting op HOME-pad ─────────────────────────────
-            vx_robot, vy_robot = obstacle_map.apply_repulsion(
-                px, py, pth, vx_robot, vy_robot)
-
-            # ── Ultrasoon-dodge (puur sensor-asymmetrie, geen target) ─────
-            vy_dodge = _ultra_dodge_vy()
-            if vy_dodge != 0.0:
-                vx_robot *= ULTRA_DODGE_VX_SCALE
-                vy_robot  = vy_dodge
-
-            # Begrens totale snelheid na samenvoegen HOME-vector + afstoting
-            combined_spd = math.sqrt(vx_robot**2 + vy_robot**2)
-            if combined_spd > _HOME_MAX_SPD_REPULSE:
-                factor = _HOME_MAX_SPD_REPULSE / combined_spd
-                vx_robot *= factor
-                vy_robot *= factor
-
-            write_drive_cmd(vx_robot, vy_robot, omega)
+            write_drive_cmd(0.0, 0.0, omega)
 
         await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
         await asyncio.sleep(0.05)   # 20 Hz
 
 # ============================================================
-# AUTO — TO_START transport-modus constanten
+# AUTO — TO_START constanten
 # ============================================================
-_TS_MECANUM_DIST  = 0.40   # [m] onder deze afstand naar volledige mecanum regelaar
-_TS_ALIGN_TH      = 0.15   # [rad] max uitlijningsfout voordat rechtdoor rijden begint (~9°)
-_TS_MAX_CORR_OMG  = 0.8    # [rad/s] max bijstuur-omega tijdens transport-fase
+_TS_TIMEOUT       = 45.0   # [s]  maximale tijd voor terugrit; daarna direct LOSSEN
+_TS_MAX_CORR_OMG  = 0.8    # [rad/s] max bijstuur-omega (ongebruikt na vereenvoudiging)
+_ts_t_start       = 0.0    # starttijd TO_START (wordt gezet bij binnenkomst state)
 
 # ── DRIVE_PICKUP rechte-lijn parameters ─────────────────────
-PICKUP_APPROACH_DIST = 0.10   # [m]   afstand rechtdoor bij DRIVE_PICKUP
+PICKUP_APPROACH_DIST = 0.25   # [m]   afstand rechtdoor bij DRIVE_PICKUP
 PICKUP_APPROACH_SPD  = 0.4    # [m/s] snelheid tijdens rechte-lijn aanrijden
 
 async def _drive_straight(distance: float, speed: float):
@@ -1260,6 +1227,7 @@ async def _drive_straight(distance: float, speed: float):
 # ============================================================
 async def auto_loop():
     global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
+    global _last_target, _target_lost_n, _last_dir_pos
     _prev_state = None
 
     while True:
@@ -1283,17 +1251,23 @@ async def auto_loop():
         # Reset tellers, sluit laadklep, dan direct naar SEARCH
         elif auto_state == AUTO_INIT:
             write_drive_cmd(0.0, 0.0, 0.0)
-            _auto_cup_count = 0
+            _auto_cup_count       = 0
             _cup_touching_gripper = False
+            _last_target          = None   # tracking schoon starten
+            _target_lost_n        = 0
+            _last_dir_pos         = False
             _klep_dicht()
             print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
             auto_state = AUTO_SEARCH
             await asyncio.sleep(0.1)
 
         # ── SEARCH ───────────────────────────────────────────────────────────
-        # Draai langzaam rond tot er een beker in beeld komt
+        # Draai op vaste snelheid (SEARCH_OMEGA) tot een beker gedetecteerd is.
+        # Reset tracking zodat DRIVE_TARGET schoon begint.
         elif auto_state == AUTO_SEARCH:
             if _auto_bekers:
+                _last_target   = None   # tracking schoon beginnen
+                _target_lost_n = 0
                 print("[auto] SEARCH: beker gevonden → DRIVE_TARGET")
                 auto_state = AUTO_DRIVE_TRAGET
             else:
@@ -1301,57 +1275,104 @@ async def auto_loop():
             await asyncio.sleep(0.05)
 
         # ── DRIVE TARGET ─────────────────────────────────────────────────────
-        # Rij naar de gevonden beker; obstakelvermijding actief.
-        # _pickup_ready (vision event) → DRIVE_PICKUP.
-        # Beker kwijt buiten tolerantie → SEARCH.
+        # Rij altijd recht vooruit op DRIVE_SPEED.
+        # Omega corrigeert de kop zodat de beker gecentreerd blijft —
+        # maar de robot stopt NIET om te draaien, hij rijdt altijd door.
+        # Zodra beker-onderkant de rode bodemzone raakt → direct stoppen → CENTER_PICKUP.
+        # Target > MAX_TARGET_LOST_FRAMES frames kwijt → SEARCH.
         elif auto_state == AUTO_DRIVE_TRAGET:
-            # Zodra de beker het gele vlak raakt → stop en centreer eerst
+
+            # ── Bodemtrigger: direct stoppen en centreren ─────────────────────
             if _cup_touching_gripper:
                 write_drive_cmd(0.0, 0.0, 0.0)
-                print("[auto] DRIVE_TARGET: beker raakt gripper-zone → CENTER_PICKUP")
+                print("[auto] DRIVE_TARGET: beker in rode bodemzone → CENTER_PICKUP")
                 auto_state = AUTO_CENTER_PICKUP
                 await asyncio.sleep(0.05)
                 continue
 
-            if not _auto_bekers and _last_target is None and not _cup_touching_gripper:
-                # Target écht kwijt (persistent tracking uitgeput)
-                print("[auto] DRIVE_TARGET: target kwijt → SEARCH")
+            # ── Beker selectie + tracking ─────────────────────────────────────
+            if _auto_bekers:
+                _target_lost_n = 0
+                # Locked tracking: altijd de beker die het dichtst bij het
+                # laatste bekende punt zit. Pas bij geen vorig punt → grootste.
+                if _last_target is not None:
+                    best = min(_auto_bekers,
+                               key=lambda b: (b[0]+b[2]//2 - _last_target[0])**2
+                                           + (b[1]+b[3]//2 - _last_target[1])**2)
+                else:
+                    best = max(_auto_bekers, key=lambda b: b[4])
+
+                bx, by, bw, bh, _ = best
+                cx = bx + bw // 2
+                _last_target  = (cx, by + bh // 2)
+                _last_dir_pos = cx >= _auto_frame_w // 2
+
+            elif _last_target is not None:
+                # Korte occlussie: stuur op laatste bekende positie
+                _target_lost_n += 1
+                if _target_lost_n > MAX_TARGET_LOST_FRAMES:
+                    print("[auto] DRIVE_TARGET: target kwijt → SEARCH")
+                    _last_target = None
+                    auto_state   = AUTO_SEARCH
+                    await asyncio.sleep(0.05)
+                    continue
+                cx = _last_target[0]
+
+            else:
+                # Geen target en geen history → SEARCH
+                print("[auto] DRIVE_TARGET: geen target → SEARCH")
                 auto_state = AUTO_SEARCH
                 await asyncio.sleep(0.05)
                 continue
 
-            vx, vy, omega = _compute_velocity(_auto_bekers, _auto_frame_w)
-            vx, vy, omega = _apply_avoidance(vx, vy, omega)
+            # ── Rijcommando: altijd vooruit, omega corrigeert kop ────────────
+            cx    = _last_target[0]
+            error = (cx - _auto_frame_w // 2) / (_auto_frame_w // 2)
+            omega = 0.0 if abs(error) < ERROR_DEADBAND else \
+                    max(-MAX_OMEGA, min(MAX_OMEGA, -K_OMEGA * error))
+            vx    = DRIVE_SPEED
 
-            # Zijdelingse ultrasoon-dodge — richting afhankelijk van target positie
-            target_cx = _last_target[0] if _last_target is not None else None
-            vy_dodge  = _ultra_dodge_vy(target_cx, _auto_frame_w)
+            # Obstakel veiligheidscheck (kap vx bij obstakel voor)
+            vx, _, omega = _apply_avoidance(vx, 0.0, omega)
+
+            # Ultrasoon zijdelingse dodge
+            vy_dodge = _ultra_dodge_vy(cx, _auto_frame_w)
             if vy_dodge != 0.0:
-                vx  *= ULTRA_DODGE_VX_SCALE   # remmen tijdens zijwaarts uitwijken
-                vy   = vy_dodge               # overschrijf vy volledig
+                vx *= ULTRA_DODGE_VX_SCALE
+            vy = vy_dodge
 
             write_drive_cmd(vx, vy, omega)
             await asyncio.sleep(0.05)
 
         # ── CENTER PICKUP ─────────────────────────────────────────────────────
-        # Draai op de plek totdat de beker horizontaal gecentreerd staat in
-        # het camerabeeld. Daarna pas verder naar DRIVE_PICKUP.
+        # Robot staat stil. Draai op de plek totdat de gevolgde beker exact
+        # horizontaal gecentreerd staat (error < ERROR_DEADBAND).
+        # Daarna pas verder naar DRIVE_PICKUP.
         elif auto_state == AUTO_CENTER_PICKUP:
             if _auto_bekers:
-                best = max(_auto_bekers, key=lambda b: b[4])
+                # Gebruik de gevolgde beker (dichtst bij _last_target),
+                # niet de grootste — zodat bij meerdere cups de juiste blijft gekozen.
+                if _last_target is not None:
+                    best = min(_auto_bekers,
+                               key=lambda b: (b[0] + b[2]//2 - _last_target[0])**2
+                                           + (b[1] + b[3]//2 - _last_target[1])**2)
+                else:
+                    best = max(_auto_bekers, key=lambda b: b[4])
+
                 bx, by, bw, bh, _ = best
                 cx    = bx + bw // 2
                 error = (cx - _auto_frame_w // 2) / (_auto_frame_w // 2)
+
                 if abs(error) < ERROR_DEADBAND:
                     write_drive_cmd(0.0, 0.0, 0.0)
                     print("[auto] CENTER_PICKUP: beker gecentreerd → DRIVE_PICKUP")
                     auto_state = AUTO_DRIVE_PICKUP
                 else:
-                    # Alleen draaien, niet rijden
+                    # Alleen draaien op de plek, niet rijden
                     omega = max(-MAX_OMEGA * 0.5, min(MAX_OMEGA * 0.5, -K_OMEGA * error))
                     write_drive_cmd(0.0, 0.0, omega)
             else:
-                # Beker tijdelijk niet zichtbaar → ga toch verder
+                # Beker niet meer zichtbaar (bijv. te dichtbij) → toch doorgaan
                 write_drive_cmd(0.0, 0.0, 0.0)
                 print("[auto] CENTER_PICKUP: beker niet zichtbaar → DRIVE_PICKUP")
                 auto_state = AUTO_DRIVE_PICKUP
@@ -1402,68 +1423,72 @@ async def auto_loop():
             await asyncio.sleep(0.1)
 
         # ── TO START ─────────────────────────────────────────────────────────
-        # Fase 1 (ver):  draai naar home-richting, rij dan recht vooruit met
-        #                kleine omega-bijsturing, vy=0 (transport-modus).
-        # Fase 2 (dichtbij, < _TS_MECANUM_DIST): volledige mecanum regelaar.
+        # Holonomische P-regelaar: rij direct naar (0,0) en corrigeer heading
+        # tegelijk. Dezelfde aanpak als home_loop (bewezen werkend).
+        # Veiligheids-timeout: na _TS_TIMEOUT seconden toch doorgaan naar LOSSEN.
         elif auto_state == AUTO_TO_START:
+            # ── Eenmalige initialisatie bij binnenkomst ───────────────────────
+            if _prev_state != AUTO_TO_START:
+                _ts_t_start = time.time()
+                px0, py0, pth0 = _read_pose()
+                print(f"[auto] TO_START gestart — pose: x={px0:.3f} y={py0:.3f} θ={math.degrees(pth0):.1f}°")
+
             px, py, pth = _read_pose()
             dist   = math.sqrt(px*px + py*py)
             th_err = _angle_wrap(-pth)
 
+            # ── Guard: pose (0,0,0) = odometrie niet actief ──────────────────
+            if dist < 0.001 and abs(pth) < 0.001:
+                print("[auto] TO_START: WAARSCHUWING pose=(0,0,0) — odometrie actief?")
+                write_drive_cmd(0.0, 0.0, 0.0)
+                await asyncio.sleep(0.5)
+                continue
+
+            # ── Timeout fallback ─────────────────────────────────────────────
+            elapsed = time.time() - _ts_t_start
+            if elapsed > _TS_TIMEOUT:
+                write_drive_cmd(0.0, 0.0, 0.0)
+                print(f"[auto] TO_START: timeout na {_TS_TIMEOUT}s → LOSSEN")
+                auto_state = AUTO_LOSSEN
+                await asyncio.sleep(0.1)
+                continue
+
+            # ── Klaar? ───────────────────────────────────────────────────────
             if dist < _HOME_DONE_XY and abs(th_err) < _HOME_DONE_TH:
                 write_drive_cmd(0.0, 0.0, 0.0)
-                print("[auto] TO_START: startpositie bereikt → LOSSEN")
+                print(f"[auto] TO_START: startpositie bereikt (dist={dist:.3f}m) → LOSSEN")
                 auto_state = AUTO_LOSSEN
+                await asyncio.sleep(0.1)
+                continue
 
-            elif dist > _TS_MECANUM_DIST:
-                # ── Transport-modus: draai eerst, rij daarna recht ───────────
-                angle_to_home = math.atan2(-py, -px)
-                align_err     = _angle_wrap(angle_to_home - pth)
+            # ── Forward-strategie (identiek aan home_loop) ───────────────────
+            # Fase 1: draai naar home-richting
+            # Fase 2: rijdt recht vooruit
+            # Fase 3: corrigeer heading naar theta=0
+            angle_to_home = math.atan2(-py, -px)
+            align_err     = _angle_wrap(angle_to_home - pth)
 
-                if abs(align_err) > _TS_ALIGN_TH:
-                    # Fase 1a: draai op plek naar home-richting
-                    omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG,
-                                _HOME_K_OMEGA * align_err))
-                    write_drive_cmd(0.0, 0.0, omega)
-                else:
-                    # Fase 1b: recht vooruit + kleine kopbijsturing, vy=0
-                    vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
-                    omega = max(-_TS_MAX_CORR_OMG, min(_TS_MAX_CORR_OMG,
-                                _HOME_K_OMEGA * align_err))
-                    # Obstakelafstoting + ultrasoon-dodge (sensor-asymmetrie)
-                    _, vy_rep = obstacle_map.apply_repulsion(px, py, pth, 0.0, 0.0)
-                    vy_rep = max(-_HOME_MAX_SPD * 0.4, min(_HOME_MAX_SPD * 0.4, vy_rep))
-                    vy_dodge = _ultra_dodge_vy()
-                    if vy_dodge != 0.0:
-                        vx    *= ULTRA_DODGE_VX_SCALE
-                        vy_rep = vy_dodge
-                    write_drive_cmd(vx, vy_rep, omega)
+            if dist > _HOME_DONE_XY and abs(align_err) > _FORWARD_ALIGN_TH:
+                omega = _HOME_K_OMEGA * align_err
+                if abs(align_err) < _HOME_OMEGA_DEADBAND:
+                    omega = 0.0
+                omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
+                write_drive_cmd(0.0, 0.0, omega)
+
+            elif dist > _HOME_DONE_XY:
+                vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+                omega = _HOME_K_OMEGA * align_err
+                if abs(align_err) < _HOME_OMEGA_DEADBAND:
+                    omega = 0.0
+                omega = max(-_HOME_MAX_OMG * 0.3, min(_HOME_MAX_OMG * 0.3, omega))
+                write_drive_cmd(vx, 0.0, omega)
 
             else:
-                # ── Fase 2: dichtbij — volledige mecanum regelaar ────────────
-                omega_lim = _HOME_MAX_OMG if dist > _HOME_DONE_XY else _HOME_FINAL_OMG
-                omega     = max(-omega_lim, min(omega_lim, _HOME_K_OMEGA * th_err))
+                omega = 0.0 if abs(th_err) < _HOME_OMEGA_DEADBAND else \
+                        max(-_HOME_FINAL_OMG, min(_HOME_FINAL_OMG, _HOME_K_OMEGA * th_err))
+                write_drive_cmd(0.0, 0.0, omega)
 
-                vx_w = _HOME_K_POS * (-px)
-                vy_w = _HOME_K_POS * (-py)
-                spd  = math.sqrt(vx_w*vx_w + vy_w*vy_w)
-                if spd > _HOME_MAX_SPD:
-                    vx_w *= _HOME_MAX_SPD / spd
-                    vy_w *= _HOME_MAX_SPD / spd
-
-                cos_t    = math.cos(pth)
-                sin_t    = math.sin(pth)
-                vx_robot =  vx_w * cos_t + vy_w * sin_t
-                vy_robot = -vx_w * sin_t + vy_w * cos_t
-                vx_robot, vy_robot = obstacle_map.apply_repulsion(
-                    px, py, pth, vx_robot, vy_robot)
-                # Ultrasoon-dodge ook in mecanum fase (korte afstand)
-                vy_dodge = _ultra_dodge_vy()
-                if vy_dodge != 0.0:
-                    vx_robot *= ULTRA_DODGE_VX_SCALE
-                    vy_robot  = vy_dodge
-                write_drive_cmd(vx_robot, vy_robot, omega)
-
+            await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
             await asyncio.sleep(0.05)
 
         # ── LOSSEN ───────────────────────────────────────────────────────────

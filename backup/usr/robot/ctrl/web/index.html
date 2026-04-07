@@ -244,6 +244,12 @@
       <div id="auto-cups-icons"><!-- gevuld door JS --></div>
       <span id="auto-cups-label">0 / 3 bekers</span>
     </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+      <label style="font-size:0.75em;color:#8b949e;white-space:nowrap;">Max bekers</label>
+      <input type="range" min="1" max="10" value="3" id="sl-max-cups" style="width:80px;accent-color:#3fb950;"
+             oninput="sliderVal('sl-max-cups','sv-max-cups'); send('set_max_cups:'+this.value)">
+      <span style="font-size:0.85em;font-weight:bold;color:#3fb950;min-width:14px;" id="sv-max-cups">3</span>
+    </div>
     <button id="btn-auto-start" onclick="autoStartStop()">&#9654; Start</button>
   </div>
 </div>
@@ -516,7 +522,7 @@ let mode     = "manual";
 let pressTimer = null;
 let autoState  = "idle";
 let autoCups   = 0;
-const AUTO_MAX_CUPS = 3;
+let AUTO_MAX_CUPS = 3;
 
 // ── Auto state vertalingen + dot-klasse ──────────────────────
 const AUTO_STATE_NL = {
@@ -739,6 +745,10 @@ ws.onmessage = (e) => {
     setSlider("sl-ignore-top", "sv-ignore-top", parseInt(d.slice(15)));
   } else if (d.startsWith("bottom_trigger_pct:")) {
     setSlider("sl-bottom-trigger", "sv-bottom-trigger", parseInt(d.slice(19)));
+  } else if (d.startsWith("max_cups:")) {
+    AUTO_MAX_CUPS = parseInt(d.slice(9));
+    setSlider("sl-max-cups", "sv-max-cups", AUTO_MAX_CUPS);
+    applyAutoCups(autoCups);
   } else if (d.startsWith("klep:")) {
     applyKlep(d.slice(5));
   } else if (d.startsWith("obstacles:")) {
