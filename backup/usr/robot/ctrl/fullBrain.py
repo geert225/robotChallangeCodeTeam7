@@ -96,15 +96,42 @@ _auto_cup_count: int = 0    # aantal opgepakte bekers in huidige cyclus
 AUTO_MAX_CUPS        = 3    # aantal bekers voordat robot terugrijdt naar start
 
 # ============================================================
-# LAADKLEP — DUMMY FUNCTIES  (TODO: vervang door hardware-aansturing)
+# SHARED MEMORY — SERVO (laadklep)
+# Format: <B  →  0 = open, 1 = dicht
+# ============================================================
+SERVO_SHM_PATH = "/dev/shm/servo"
+SERVO_FMT      = "<B"
+SERVO_SIZE     = struct.calcsize(SERVO_FMT)
+
+def _open_servo_shm():
+    if not os.path.exists(SERVO_SHM_PATH):
+        with open(SERVO_SHM_PATH, "wb") as f:
+            f.write(b"\x00" * SERVO_SIZE)
+    fh  = open(SERVO_SHM_PATH, "r+b")
+    shm = mmap.mmap(fh.fileno(), SERVO_SIZE)
+    return shm, fh
+
+servo_shm, servo_fh = _open_servo_shm()
+
+def _servo_write(value: int):
+    """Schrijf servo-positie: 0 = open, 1 = dicht."""
+    fcntl.flock(servo_fh.fileno(), fcntl.LOCK_EX)
+    servo_shm.seek(0)
+    servo_shm.write(struct.pack(SERVO_FMT, value))
+    fcntl.flock(servo_fh.fileno(), fcntl.LOCK_UN)
+
+# ============================================================
+# LAADKLEP — sturing via servo SHM
 # ============================================================
 def _klep_open():
-    """Laadklep openen — TODO: implementeer hardware sturing."""
-    print("[auto] laadklep OPEN (dummy)")
+    """Laadklep openen (servo = 0)."""
+    _servo_write(0)
+    print("[klep] OPEN")
 
 def _klep_dicht():
-    """Laadklep sluiten — TODO: implementeer hardware sturing."""
-    print("[auto] laadklep DICHT (dummy)")
+    """Laadklep sluiten (servo = 1)."""
+    _servo_write(1)
+    print("[klep] DICHT")
 
 # ============================================================
 # SHARED MEMORY — HELPERS
@@ -420,6 +447,10 @@ MIN_YELLOW_AREA  = 400   # kleinste gele blob die als gripper-vlak telt
 PICKUP_OVERLAP_RATIO = 0.25  # fractie van de beker-bbox die het gele vlak moet overlappen
 PICKUP_MIN_CUP_AREA  = 2500  # beker moet groot genoeg zijn (dichtbij) om event te triggeren
 
+# Bovenkant van het frame negeren (% van frame hoogte, 0 = alles checken)
+# Bekers waarvan het middelpunt boven deze lijn valt worden genegeerd.
+CUP_IGNORE_TOP_PCT = 20   # instelbaar via web (set_ignore_top_pct:XX)
+
 _last_dir_pos  = False
 _last_target   = None   # (cx, cy) van vorige frame
 _target_lost_n = 0      # frames achtereen zonder detectie
@@ -461,16 +492,13 @@ def _compute_velocity(bekers, frame_w):
 
     _target_lost_n = 0
 
-    # Kies beste beker: dichtst bij laatste bekende positie, anders grootste
+    # Kies beste beker:
+    #   - Als er al een target is (locked): altijd de dichtstbijzijnde beker kiezen
+    #     zodat de robot niet switcht naar een andere beker als er meerdere in beeld zijn.
+    #   - Nog geen target: kies de grootste beker als beginpunt.
     if _last_target is not None:
-        hits = []
-        for b in bekers:
-            x, y, w, h, area = b
-            cx, cy = x + w // 2, y + h // 2
-            d2 = (cx - _last_target[0])**2 + (cy - _last_target[1])**2
-            if d2 < MAX_TRACK_DIST**2:
-                hits.append((d2, b))
-        best = min(hits, key=lambda t: t[0])[1] if hits else max(bekers, key=lambda b: b[4])
+        best = min(bekers, key=lambda b: (b[0] + b[2]//2 - _last_target[0])**2
+                                       + (b[1] + b[3]//2 - _last_target[1])**2)
     else:
         best = max(bekers, key=lambda b: b[4])
 
@@ -519,6 +547,9 @@ async def vision_loop():
         mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
+        # Bereken de Y-cutoff voor de topzone (pixels vanaf bovenkant)
+        _ignore_top_y = int(frame_h * CUP_IGNORE_TOP_PCT / 100)
+
         bekers = []
         if _cup_detection_enabled:
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -526,8 +557,17 @@ async def vision_loop():
                 area = cv2.contourArea(c)
                 if MIN_BEKER_AREA < area < MAX_BEKER_AREA:
                     x, y, w, h = cv2.boundingRect(c)
+                    cy_center = y + h // 2
+                    if cy_center < _ignore_top_y:
+                        continue   # beker zit in genegeerde topzone
                     bekers.append((x, y, w, h, area))
                     cv2.rectangle(frame_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
+
+        # Teken topzone-grens als stippellijn (alleen als % > 0)
+        if _ignore_top_y > 0:
+            for xi in range(0, frame_w, 12):
+                cv2.line(frame_bgr, (xi, _ignore_top_y), (min(xi+6, frame_w), _ignore_top_y),
+                         (0, 180, 255), 1)
 
         cups_bgr = frame_bgr.copy()  # stap "bekers": na cup-boxes, vóór gele zone
 
@@ -710,7 +750,7 @@ async def handle_control_ws(reader, writer, request):
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
-    global _vision_debug_step, auto_state, _cup_detection_enabled
+    global _vision_debug_step, auto_state, _cup_detection_enabled, CUP_IGNORE_TOP_PCT
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -731,6 +771,7 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"yellow_hsv:{yl[0]},{yl[1]},{yl[2]},{yh[0]},{yh[1]},{yh[2]}")
     await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
     await _ws_send_text(writer, f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
+    await _ws_send_text(writer, f"ignore_top_pct:{CUP_IGNORE_TOP_PCT}")
 
     try:
         while True:
@@ -830,6 +871,23 @@ async def handle_control_ws(reader, writer, request):
                 _cup_detection_enabled = msg.split(":", 1)[1].strip() == "1"
                 print(f"[brain] cup detectie → {'aan' if _cup_detection_enabled else 'uit'}")
                 await _broadcast(f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
+
+            elif msg.startswith("set_ignore_top_pct:"):
+                try:
+                    CUP_IGNORE_TOP_PCT = max(0, min(80, int(msg.split(":", 1)[1])))
+                    print(f"[brain] topzone negeren → {CUP_IGNORE_TOP_PCT}%")
+                    await _broadcast(f"ignore_top_pct:{CUP_IGNORE_TOP_PCT}")
+                except ValueError:
+                    pass
+
+            # ---- LAADKLEP (manual bediening, werkt in alle modi) ----
+            elif msg == "klep_open":
+                _klep_open()
+                await _broadcast("klep:open")
+
+            elif msg == "klep_dicht":
+                _klep_dicht()
+                await _broadcast("klep:dicht")
 
             # ---- RIJDEN (alleen in MANUAL) ----
             elif robot_mode == MODE_MANUAL:
