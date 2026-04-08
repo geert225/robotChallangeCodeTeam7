@@ -869,7 +869,7 @@ function setVisionStep(step) { send("set_vision_step:" + step); }
 function setStatus(msg) { document.getElementById("status").textContent = msg; }
 
 function press(cmd) {
-  if (mode !== "manual") return;
+  if (mode !== "manual" && !(mode === "auto" && autoPaused)) return;
   if (pressTimer !== null) return;
   send(cmd);
   pressTimer = setInterval(() => send(cmd), 80);
@@ -993,13 +993,19 @@ function autoPause() {
 
 function applyPaused(paused) {
   autoPaused = paused;
-  const btn = document.getElementById("btn-auto-pause");
+  const btn     = document.getElementById("btn-auto-pause");
+  const ctrl    = document.getElementById("controls");
+  const gripper = document.getElementById("gripper-panel");
   if (paused) {
     btn.textContent = "▶ Hervat";
     btn.classList.add("paused");
+    ctrl.classList.remove("hidden");
+    gripper.classList.remove("hidden");
   } else {
     btn.innerHTML = "&#9646;&#9646; Pauze";
     btn.classList.remove("paused");
+    ctrl.classList.add("hidden");
+    gripper.classList.add("hidden");
   }
 }
 
@@ -1287,7 +1293,7 @@ drawHsvPreview();
 // ── Toetsenbord ───────────────────────────────────────────────
 let keys = new Set();
 document.addEventListener("keydown", (e) => {
-  if (mode !== "manual" || e.repeat) return;
+  if ((mode !== "manual" && !(mode === "auto" && autoPaused)) || e.repeat) return;
   const map = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right", "[":"rot_left", "]":"rot_right" };
   if (map[e.key]) { keys.add(e.key); flushKeys(); }
 });

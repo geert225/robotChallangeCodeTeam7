@@ -330,6 +330,10 @@ ULTRA_CLEAR_TIME     = 2.5   # [s] BEIDE sensoren vrij voor vrijgave richting
 ULTRA_STUCK_TIME     = 0.5   # [s] wacht voor stuck-check na starten dodge
 ULTRA_STUCK_MIN_TICKS = 30   # min. encoder strafe-ticks in ULTRA_STUCK_TIME (anders = vast)
 
+# Obstakeldetectie tijdens rotatie-zoeken (SEARCH + SEARCH_HOME)
+ROT_ULTRA_STOP_CM  = 20    # [cm] drempel: stop draaien en rij achteruit
+ROT_ULTRA_BACK_SPD = 0.15   # [m/s] achteruitsnelheid tot sensoren vrij zijn
+
 _ultra_dodge_hold_dir  = 0    # 1=links, -1=rechts, 0=inactief
 _ultra_dodge_clear_t   = 0.0  # tijdstip waarop beide sensoren voor het eerst vrij waren
 _ultra_dodge_start_t   = 0.0  # tijdstip waarop huidige dodge-richting gekozen is
@@ -1052,6 +1056,10 @@ async def handle_control_ws(reader, writer, request):
 
             elif msg == "auto_resume":
                 if robot_mode == MODE_AUTO and _auto_paused:
+                    drive_state["vx"] = 0.0
+                    drive_state["vy"] = 0.0
+                    drive_state["omega"] = 0.0
+                    write_drive_cmd(0.0, 0.0, 0.0)
                     _auto_paused = False
                     print("[brain] auto HERVAT")
                     await _broadcast("paused:false")
@@ -1148,8 +1156,8 @@ async def handle_control_ws(reader, writer, request):
                 _klep_dicht()
                 await _broadcast("klep:dicht")
 
-            # ---- RIJDEN (alleen in MANUAL) ----
-            elif robot_mode == MODE_MANUAL:
+            # ---- RIJDEN (MANUAL of AUTO-PAUSED) ----
+            elif robot_mode == MODE_MANUAL or (robot_mode == MODE_AUTO and _auto_paused):
                 if msg == "up":
                     drive_state["vx"] = SPEED
                 elif msg == "down":
@@ -1253,7 +1261,7 @@ async def handle_client(reader, writer):
 # ============================================================
 async def heartbeat():
     while True:
-        if robot_mode == MODE_MANUAL:
+        if robot_mode == MODE_MANUAL or (robot_mode == MODE_AUTO and _auto_paused):
             write_drive_cmd(drive_state["vx"], drive_state["vy"], drive_state["omega"])
             led_manual_update(drive_state["vx"], drive_state["vy"], drive_state["omega"])
         await asyncio.sleep(0.05)
@@ -1604,6 +1612,14 @@ async def auto_loop():
                 print("[auto] SEARCH: beker gevonden → DRIVE_TARGET")
                 auto_state = AUTO_DRIVE_TRAGET
             else:
+                # Obstakel check: stop draaien en rij achteruit tot sensoren vrij
+                _s1 = _ultra_d1 if _ultra_d1 > 0 else 9999
+                _s2 = _ultra_d2 if _ultra_d2 > 0 else 9999
+                if min(_s1, _s2) < ROT_ULTRA_STOP_CM:
+                    write_drive_cmd(-ROT_ULTRA_BACK_SPD, 0.0, 0.0)
+                    await asyncio.sleep(0.01)
+                    continue
+
                 search_omega = SEARCH_OMEGA if not _last_dir_pos else -SEARCH_OMEGA
                 write_drive_cmd(0.0, 0.0, search_omega)
                 if _motor_stuck_update_rot(search_omega):
@@ -1806,6 +1822,14 @@ async def auto_loop():
                     auto_state = AUTO_DRIVE_HOME
                     await asyncio.sleep(0.05)
                     continue
+
+            # Obstakel check: stop draaien en rij achteruit tot sensoren vrij
+            _s1 = _ultra_d1 if _ultra_d1 > 0 else 9999
+            _s2 = _ultra_d2 if _ultra_d2 > 0 else 9999
+            if min(_s1, _s2) < ROT_ULTRA_STOP_CM:
+                write_drive_cmd(-ROT_ULTRA_BACK_SPD, 0.0, 0.0)
+                await asyncio.sleep(0.01)
+                continue
 
             search_omega = HOME_POLE_SEARCH_OMEGA if not _last_dir_pos else -HOME_POLE_SEARCH_OMEGA
             write_drive_cmd(0.0, 0.0, search_omega)
