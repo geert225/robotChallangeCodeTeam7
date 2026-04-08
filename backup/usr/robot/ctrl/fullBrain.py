@@ -314,16 +314,20 @@ def _read_ultra():
     return int(d1), int(d2)
 
 # ---- Obstacle avoidance drempelwaarden (cm) ----
-# Beide sensoren zitten aan de voorzijde.
-ULTRA_SAFE_CM  = 15    # hard stop  — blokkeer vooruitrijden
-ULTRA_WARN_CM  = 30    # vertraagzone — snelheid lineair afschalen
-ULTRA_DODGE_CM = 20    # ontwijkdrempel — start zijdelingse dodge
-ULTRA_DODGE_SPD = 0.6  # [m/s] zijdelingse ontwijksnelheid
-ULTRA_DODGE_VX_SCALE = 0.3  # factor waarmee vx wordt gereduceerd tijdens dodge
+# d1 = linker sensor, d2 = rechter sensor (beide aan voorzijde).
+ULTRA_SAFE_CM        = 15    # hard stop — blokkeer vooruitrijden
+ULTRA_WARN_CM        = 30    # vertraagzone — vx lineair afschalen
+ULTRA_DODGE_CM       = 20    # ontwijkdrempel — start zijdelingse dodge
+ULTRA_DODGE_SPD      = 0.6   # [m/s] zijdelingse ontwijksnelheid
+ULTRA_DODGE_VX_SCALE = 0.3   # vx-reductie factor tijdens dodge
+ULTRA_CLEAR_TIME     = 1.5   # [s] BEIDE sensoren vrij voor vrijgave richting
+
+_ultra_dodge_hold_dir = 0    # 1=links, -1=rechts, 0=inactief
+_ultra_dodge_clear_t  = 0.0  # tijdstip waarop beide sensoren voor het eerst vrij waren
 
 def _apply_avoidance(vx: float, vy: float, omega: float):
-    """Past vx aan o.b.v. actuele ultrasoonwaarden (alleen AUTO). 0 = geen data → geen ingreep."""
-    if vx > 0:   # vooruit → check beide voor-sensoren, neem de kortste afstand
+    """Schaal vx terug o.b.v. ultrasoonwaarden. 0 = geen data → geen ingreep."""
+    if vx > 0:
         s1 = _ultra_d1 if _ultra_d1 > 0 else 9999
         s2 = _ultra_d2 if _ultra_d2 > 0 else 9999
         front = min(s1, s2)
@@ -333,47 +337,56 @@ def _apply_avoidance(vx: float, vy: float, omega: float):
             vx *= (front - ULTRA_SAFE_CM) / (ULTRA_WARN_CM - ULTRA_SAFE_CM)
     return vx, vy, omega
 
-def _ultra_dodge_vy(target_cx: int | None = None, frame_w: int = 320) -> float:
-    """Bereken een zijdelingse ontwijksnelheid op basis van ultrasoon.
+def _ultra_dodge_vy() -> float:
+    """Zijdelingse ontwijksnelheid op basis van ultrasoon.
 
-    Wordt gebruikt door DRIVE_TARGET en home_loop wanneer een sensor
-    een obstakel dichter dan ULTRA_DODGE_CM detecteert.
-
-    Richting-logica (prioriteit):
-      1. Target-kant: als target_cx bekend is, wijk af NAAR de kant van
-         het target (zodat de robot niet van het doel wegdraait).
-      2. Sensor-asymmetrie: de sensor die het minst bezet is wijst de
-         vrije kant aan.
-      3. Beide sensoren gelijk bezet: wijk naar rechts (vy < 0).
+    Logica:
+      - Als een sensor te dichtbij is: kies de kant met de MEESTE ruimte
+        (kleinste waarde = meest geblokkeerd → dodge naar andere kant).
+      - Gekozen richting vasthouden totdat BEIDE sensoren vrij zijn
+        gedurende ULTRA_CLEAR_TIME seconden.
 
     Returns:
-      vy_dodge  [m/s], positief = links, negatief = rechts, 0.0 = geen dodge.
+      vy [m/s], positief = links, negatief = rechts, 0.0 = geen dodge.
     """
-    s1 = _ultra_d1 if _ultra_d1 > 0 else 9999   # sensor "links"  (d1)
-    s2 = _ultra_d2 if _ultra_d2 > 0 else 9999   # sensor "rechts" (d2)
-    close = min(s1, s2)
+    global _ultra_dodge_hold_dir, _ultra_dodge_clear_t
 
-    if close > ULTRA_DODGE_CM:
-        return 0.0   # niets in de weg
+    s1 = _ultra_d1 if _ultra_d1 > 0 else 9999   # linker sensor (d1)
+    s2 = _ultra_d2 if _ultra_d2 > 0 else 9999   # rechter sensor (d2)
+    both_clear = s1 > ULTRA_DODGE_CM and s2 > ULTRA_DODGE_CM
 
-    # ── Richting bepalen ─────────────────────────────────────
-    # Positief vy = links in robot-frame, negatief = rechts.
-
-    if target_cx is not None:
-        # Target-kant: rij naar de kant waar het target zit
-        target_is_left = target_cx < frame_w // 2
-        vy_dodge = ULTRA_DODGE_SPD if target_is_left else -ULTRA_DODGE_SPD
-    else:
-        # Geen target: ga naar de meest vrije kant (grootste afstand = vrijer)
-        if abs(s1 - s2) > 5:          # duidelijk verschil
-            vy_dodge = ULTRA_DODGE_SPD if s1 > s2 else -ULTRA_DODGE_SPD
+    if _ultra_dodge_hold_dir != 0:
+        # ── Al een richting actief ────────────────────────────────────────
+        if both_clear:
+            # Start vrijgave-timer als nog niet gestart
+            if _ultra_dodge_clear_t == 0.0:
+                _ultra_dodge_clear_t = time.time()
+            elif time.time() - _ultra_dodge_clear_t >= ULTRA_CLEAR_TIME:
+                # Lang genoeg vrij: richting vrijgeven
+                _ultra_dodge_hold_dir = 0
+                _ultra_dodge_clear_t  = 0.0
+                return 0.0
         else:
-            vy_dodge = -ULTRA_DODGE_SPD  # default: rechts
+            # Obstakel nog aanwezig: reset timer
+            _ultra_dodge_clear_t = 0.0
 
-    # ── Schaal op basis van afstand (dichter = harder uitwijken) ─
-    ratio = max(0.0, min(1.0, 1.0 - (close - ULTRA_SAFE_CM) /
-                                     (ULTRA_DODGE_CM - ULTRA_SAFE_CM)))
-    return vy_dodge * (0.4 + 0.6 * ratio)   # minimaal 40% kracht bij rand
+        # Richting nog actief
+        return ULTRA_DODGE_SPD if _ultra_dodge_hold_dir > 0 else -ULTRA_DODGE_SPD
+
+    # ── Geen actieve richting ─────────────────────────────────────────────
+    if both_clear:
+        _ultra_dodge_clear_t = 0.0
+        return 0.0
+
+    # Obstakel gedetecteerd: kies kant met meeste ruimte
+    # s1 < s2 → links meer geblokkeerd → dodge rechts (-1)
+    # s1 > s2 → rechts meer geblokkeerd → dodge links (+1)
+    # s1 == s2 → default rechts
+    _ultra_dodge_hold_dir = 1 if s1 > s2 else -1
+    _ultra_dodge_clear_t  = 0.0
+    print(f"[dodge] richting gekozen: {'links' if _ultra_dodge_hold_dir>0 else 'rechts'}"
+          f"  (d1={s1}cm d2={s2}cm)")
+    return ULTRA_DODGE_SPD if _ultra_dodge_hold_dir > 0 else -ULTRA_DODGE_SPD
 
 # ============================================================
 # OBSTACLE MAP  (positiegebaseerde obstakelskaart)
@@ -430,7 +443,7 @@ MIN_OBST_AREA   = 250
 K_OMEGA         = 2.8
 MAX_OMEGA       = 4.0
 STOP_AREA       = 9_000
-SEARCH_OMEGA    = 4.0
+SEARCH_OMEGA    = 2.0
 ERROR_DEADBAND  = 0.02
 DRIVE_SPEED     = 0.7
 DRIVE_MIN_OMEGA = 1.5
@@ -1010,12 +1023,26 @@ async def heartbeat():
 # ============================================================
 # ULTRASOON LOOP  (leest SHM en broadcast naar alle WS-clients, 10 Hz)
 # ============================================================
+_ultra_obstacle_led_state = False   # huidige blink-toestand voor obstakel-LED
+
 async def ultra_loop():
-    global _ultra_d1, _ultra_d2
+    global _ultra_d1, _ultra_d2, _ultra_obstacle_led_state
 
     while True:
         d1, d2 = _read_ultra()
         _ultra_d1, _ultra_d2 = d1, d2
+
+        # ── Obstakel-LED: rood knipperen (mode 2) als dodge actief ───────────
+        s1 = d1 if d1 > 0 else 9999
+        s2 = d2 if d2 > 0 else 9999
+        obstacle_active = (s1 <= ULTRA_DODGE_CM or s2 <= ULTRA_DODGE_CM)
+
+        if obstacle_active:
+            _ultra_obstacle_led_state = not _ultra_obstacle_led_state
+            if _ultra_obstacle_led_state:
+                write_led(2, 255, 0, 0, 255, 0, 0)   # rood aan
+            else:
+                write_led(2, 0, 0, 0, 0, 0, 0)        # uit
 
         if _control_clients:
             enc = _read_gripper_enc()
@@ -1091,8 +1118,6 @@ async def obstacle_map_loop():
 # "holonomic": rijden + draaien tegelijk (kan oscilleren bij hoge gains)
 home_strategy = "forward"
 
-# ── Drempel: kopfout mag maximaal dit zijn voordat rechtdoor rijden begint
-_FORWARD_ALIGN_TH  = 0.15   # rad (~9°)
 # ── Deadband omega: kleine hoekfouten worden genegeerd (vermindert oscillatie)
 _HOME_OMEGA_DEADBAND = 0.05  # rad
 
@@ -1155,35 +1180,23 @@ async def home_loop():
             await asyncio.sleep(0.05)
             continue
 
-        # ── Fase 1: draai naar home-richting ─────────────────────────────────
-        angle_to_home = math.atan2(-py, -px)   # richting van huidige pos naar (0,0)
-        align_err     = _angle_wrap(angle_to_home - pth)
+        # ── Holonomische P-regelaar: world-frame → robot-frame ───────────────
+        # Gewenste snelheid richting (0,0) in world-frame
+        speed    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+        vx_w     = (-px / dist) * speed
+        vy_w     = (-py / dist) * speed
 
-        if dist > _HOME_DONE_XY and abs(align_err) > _FORWARD_ALIGN_TH:
-            omega = _HOME_K_OMEGA * align_err
-            if abs(align_err) < _HOME_OMEGA_DEADBAND:
-                omega = 0.0
-            omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
-            write_drive_cmd(0.0, 0.0, omega)
+        # Roteer world-frame naar robot-frame via huidige heading
+        cos_h = math.cos(pth)
+        sin_h = math.sin(pth)
+        vx_r  = vx_w * cos_h + vy_w * sin_h
+        vy_r  = -vx_w * sin_h + vy_w * cos_h
 
-        # ── Fase 2: recht vooruit rijden naar (0,0) ───────────────────────────
-        elif dist > _HOME_DONE_XY:
-            vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
-            # Kleine kopbijsturing, zacht begrensd
-            omega = _HOME_K_OMEGA * align_err
-            if abs(align_err) < _HOME_OMEGA_DEADBAND:
-                omega = 0.0
-            omega = max(-_HOME_MAX_OMG * 0.3, min(_HOME_MAX_OMG * 0.3, omega))
-            write_drive_cmd(vx, 0.0, omega)
+        # Heading-correctie naar theta=0
+        omega = 0.0 if abs(th_err) < _HOME_OMEGA_DEADBAND else \
+                max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, _HOME_K_OMEGA * th_err))
 
-        # ── Fase 3: op positie, corrigeer heading naar theta=0 ───────────────
-        else:
-            if abs(th_err) < _HOME_OMEGA_DEADBAND:
-                omega = 0.0
-            else:
-                omega = _HOME_K_OMEGA * th_err
-                omega = max(-_HOME_FINAL_OMG, min(_HOME_FINAL_OMG, omega))
-            write_drive_cmd(0.0, 0.0, omega)
+        write_drive_cmd(vx_r, vy_r, omega)
 
         await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
         await asyncio.sleep(0.05)   # 20 Hz
@@ -1228,11 +1241,13 @@ async def _drive_straight(distance: float, speed: float):
 async def auto_loop():
     global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
     global _last_target, _target_lost_n, _last_dir_pos
+    global _ultra_dodge_hold_dir, _ultra_dodge_clear_t
     _prev_state = None
 
     while True:
         if robot_mode != MODE_AUTO:
             _prev_state = None
+            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0
             await asyncio.sleep(0.05)
             continue
 
@@ -1256,6 +1271,7 @@ async def auto_loop():
             _last_target          = None   # tracking schoon starten
             _target_lost_n        = 0
             _last_dir_pos         = False
+            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0
             _klep_dicht()
             print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
             auto_state = AUTO_SEARCH
@@ -1336,7 +1352,7 @@ async def auto_loop():
             vx, _, omega = _apply_avoidance(vx, 0.0, omega)
 
             # Ultrasoon zijdelingse dodge
-            vy_dodge = _ultra_dodge_vy(cx, _auto_frame_w)
+            vy_dodge = _ultra_dodge_vy()
             if vy_dodge != 0.0:
                 vx *= ULTRA_DODGE_VX_SCALE
             vy = vy_dodge
@@ -1461,32 +1477,20 @@ async def auto_loop():
                 await asyncio.sleep(0.1)
                 continue
 
-            # ── Forward-strategie (identiek aan home_loop) ───────────────────
-            # Fase 1: draai naar home-richting
-            # Fase 2: rijdt recht vooruit
-            # Fase 3: corrigeer heading naar theta=0
-            angle_to_home = math.atan2(-py, -px)
-            align_err     = _angle_wrap(angle_to_home - pth)
+            # ── Holonomische P-regelaar: world-frame → robot-frame ───────────
+            speed    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
+            vx_w     = (-px / dist) * speed
+            vy_w     = (-py / dist) * speed
 
-            if dist > _HOME_DONE_XY and abs(align_err) > _FORWARD_ALIGN_TH:
-                omega = _HOME_K_OMEGA * align_err
-                if abs(align_err) < _HOME_OMEGA_DEADBAND:
-                    omega = 0.0
-                omega = max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, omega))
-                write_drive_cmd(0.0, 0.0, omega)
+            cos_h = math.cos(pth)
+            sin_h = math.sin(pth)
+            vx_r  = vx_w * cos_h + vy_w * sin_h
+            vy_r  = -vx_w * sin_h + vy_w * cos_h
 
-            elif dist > _HOME_DONE_XY:
-                vx    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
-                omega = _HOME_K_OMEGA * align_err
-                if abs(align_err) < _HOME_OMEGA_DEADBAND:
-                    omega = 0.0
-                omega = max(-_HOME_MAX_OMG * 0.3, min(_HOME_MAX_OMG * 0.3, omega))
-                write_drive_cmd(vx, 0.0, omega)
+            omega = 0.0 if abs(th_err) < _HOME_OMEGA_DEADBAND else \
+                    max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, _HOME_K_OMEGA * th_err))
 
-            else:
-                omega = 0.0 if abs(th_err) < _HOME_OMEGA_DEADBAND else \
-                        max(-_HOME_FINAL_OMG, min(_HOME_FINAL_OMG, _HOME_K_OMEGA * th_err))
-                write_drive_cmd(0.0, 0.0, omega)
+            write_drive_cmd(vx_r, vy_r, omega)
 
             await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
             await asyncio.sleep(0.05)
