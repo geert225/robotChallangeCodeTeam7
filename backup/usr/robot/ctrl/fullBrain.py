@@ -86,6 +86,8 @@ AUTO_PICKUP             = "pickup"      # opraap routine starten (optellen aanta
 AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden -> als robot x aantal bekers opgepakt heeft
 AUTO_LOSSEN             = "lossen"      # laad klep open zetten
 AUTO_PAUSED             = "paused"      # state machine op pauze (rijdt niet)
+AUTO_SEARCH_HOME        = "zoekHome"    # draai zoekend naar gele paal (startpositie)
+AUTO_DRIVE_HOME         = "rijHome"     # rij op gele paal af → klep open bij aankomst
 auto_state              = AUTO_IDLE
 _auto_paused            = False         # pauze-vlag (True = bevroren)
 
@@ -94,6 +96,7 @@ _auto_paused            = False         # pauze-vlag (True = bevroren)
 # ============================================================
 _auto_bekers: list  = []    # laatste beker-detecties (gevuld door vision_loop)
 _auto_frame_w: int  = 320   # frame breedte (gevuld door vision_loop)
+_auto_frame_h: int  = 240   # frame hoogte (gevuld door vision_loop)
 _auto_cup_count: int = 0    # aantal opgepakte bekers in huidige cyclus
 AUTO_MAX_CUPS        = 5    # instelbaar via web (set_max_cups:N), min 1 max 10
 
@@ -692,7 +695,7 @@ _blink_counter = 0
 BLINK_TICKS    = 25   # ~500 ms bij 20 ms sleep
 
 async def vision_loop():
-    global latest_jpeg, _blink_counter, _auto_bekers, _auto_frame_w
+    global latest_jpeg, _blink_counter, _auto_bekers, _auto_frame_w, _auto_frame_h
     global _yellow_zone, _pickup_ready, _cup_touching_gripper
 
     while True:
@@ -779,6 +782,13 @@ async def vision_loop():
             cv2.line(frame_bgr, (xi, _trigger_y), (min(xi + 6, frame_w), _trigger_y),
                      (0, 0, 255), 1)
 
+        # Teken home-trigger lijn (groen stippel) alleen tijdens terug-naar-start states
+        if auto_state in (AUTO_TO_START, AUTO_SEARCH_HOME, AUTO_DRIVE_HOME):
+            _home_trig_y = int(frame_h * HOME_POLE_ARRIVED_PCT / 100)
+            for xi in range(0, frame_w, 12):
+                cv2.line(frame_bgr, (xi, _home_trig_y), (min(xi + 6, frame_w), _home_trig_y),
+                         (0, 255, 0), 2)
+
         _pickup_ready = False
         if bekers:
             if _last_target is not None:
@@ -826,6 +836,7 @@ async def vision_loop():
             # Deel beker-data met auto_loop state machine (die schrijft rijcommando's)
             _auto_bekers = bekers
             _auto_frame_w = frame_w
+            _auto_frame_h = frame_h
 
             # LED: elke BLINK_TICKS ticks de blink-toestand wisselen
             _blink_counter += 1
@@ -1318,6 +1329,20 @@ _HOME_FINAL_OMG = 0.5  # maximale rotatiesnelheid eindcorrectie [rad/s]
 _HOME_DONE_XY  = 0.15  # aankomstdrempel positie [m]  (15 cm)
 _HOME_DONE_TH  = 0.10  # aankomstdrempel heading [rad] (~6°)
 
+# ── Gele paal (startpositie) detectie voor terugrijden via camera ─────────────
+HOME_POLE_MIN_AREA       = 1000   # min. bbox-oppervlak gele blob om als paal te tellen [px²]
+HOME_POLE_SEARCH_OMEGA   = 2.0    # [rad/s] zoekdraaisnelheid
+HOME_POLE_DRIVE_SPEED    = 0.5    # [m/s] rijsnelheid naar paal
+HOME_POLE_K_OMEGA        = 2.8    # bijstuur-gain (zelfde als bekervolger)
+HOME_POLE_MAX_OMEGA      = 3.0    # [rad/s] max bijstuursnelheid
+HOME_POLE_ERROR_DEADBAND = 0.05   # bijstuur-deadband (relatief framewidth)
+HOME_POLE_ARRIVED_PCT    = 80     # [%] onderkant gele blob t.o.v. framehoogte = "thuis"
+
+# Escape maneuver bij vastzitten tijdens SEARCH_HOME
+HOME_STUCK_ROT_TIME      = 0.6    # [s] terugdraaien bij vastzitten
+HOME_STUCK_FWD_DIST      = 0.25   # [m] vooruitrijden na terugdraaien
+HOME_STUCK_FWD_SPEED     = 0.3    # [m/s] snelheid tijdens escape
+
 def _angle_wrap(a: float) -> float:
     """Brengt hoek terug naar [-π, π]."""
     return math.atan2(math.sin(a), math.cos(a))
@@ -1427,7 +1452,7 @@ async def _drive_straight(distance: float, speed: float):
 # _auto_bekers en _auto_frame_w worden gevuld door vision_loop.
 # ============================================================
 async def auto_loop():
-    global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
+    global auto_state, _auto_bekers, _auto_frame_w, _auto_frame_h, _auto_cup_count, robot_mode, _cup_touching_gripper
     global _last_target, _target_lost_n, _last_dir_pos
     global _ultra_dodge_hold_dir, _ultra_dodge_clear_t, _ultra_dodge_start_t, _ultra_dodge_enc_snap
     global _auto_paused, _rot_stuck_t, _rot_stuck_snap, _motor_stuck_t, _motor_stuck_snap
@@ -1663,60 +1688,79 @@ async def auto_loop():
             await asyncio.sleep(0.1)
 
         # ── TO START ─────────────────────────────────────────────────────────
-        # Holonomische P-regelaar: rij direct naar (0,0) en corrigeer heading
-        # tegelijk. Dezelfde aanpak als home_loop (bewezen werkend).
-        # Veiligheids-timeout: na _TS_TIMEOUT seconden toch doorgaan naar LOSSEN.
+        # Startpunt: stap direct over naar visuele zoekfase (gele paal).
         elif auto_state == AUTO_TO_START:
-            # ── Eenmalige initialisatie bij binnenkomst ───────────────────────
-            if _prev_state != AUTO_TO_START:
-                _ts_t_start = time.time()
-                px0, py0, pth0 = _read_pose()
-                print(f"[auto] TO_START gestart — pose: x={px0:.3f} y={py0:.3f} θ={math.degrees(pth0):.1f}°")
+            write_drive_cmd(0.0, 0.0, 0.0)
+            _last_dir_pos = False
+            _last_target  = None
+            print("[auto] TO_START → SEARCH_HOME (zoek gele paal)")
+            auto_state = AUTO_SEARCH_HOME
+            await asyncio.sleep(0.05)
 
-            px, py, pth = _read_pose()
-            dist   = math.sqrt(px*px + py*py)
-            th_err = _angle_wrap(-pth)
+        # ── SEARCH HOME ──────────────────────────────────────────────────────
+        # Draai op de plek totdat de gele paal zichtbaar is.
+        # Bij vastzitten: draai terug + escape vooruit.
+        elif auto_state == AUTO_SEARCH_HOME:
+            if _yellow_zone is not None:
+                yx, yy, yw, yh = _yellow_zone
+                if yw * yh >= HOME_POLE_MIN_AREA:
+                    _last_target = None
+                    print("[auto] SEARCH_HOME: gele paal gevonden → DRIVE_HOME")
+                    auto_state = AUTO_DRIVE_HOME
+                    await asyncio.sleep(0.05)
+                    continue
 
-            # ── Guard: pose (0,0,0) = odometrie niet actief ──────────────────
-            if dist < 0.001 and abs(pth) < 0.001:
-                print("[auto] TO_START: WAARSCHUWING pose=(0,0,0) — odometrie actief?")
+            search_omega = HOME_POLE_SEARCH_OMEGA if not _last_dir_pos else -HOME_POLE_SEARCH_OMEGA
+            write_drive_cmd(0.0, 0.0, search_omega)
+
+            if _motor_stuck_update_rot(search_omega):
+                print("[auto] SEARCH_HOME: vast bij draaien → escape maneuver")
+                # Draai terug (tegengestelde richting)
+                write_drive_cmd(0.0, 0.0, -search_omega)
+                await asyncio.sleep(HOME_STUCK_ROT_TIME)
+                # Rij vooruit
+                await _drive_straight(HOME_STUCK_FWD_DIST, HOME_STUCK_FWD_SPEED)
                 write_drive_cmd(0.0, 0.0, 0.0)
-                await asyncio.sleep(0.5)
+                _last_dir_pos = not _last_dir_pos
+                print("[auto] SEARCH_HOME: escape klaar → hervatten zoeken")
+
+            await asyncio.sleep(0.05)
+
+        # ── DRIVE HOME ───────────────────────────────────────────────────────
+        # Rij op de gele paal af. Zodra de paal de groene trigger-lijn bereikt
+        # (HOME_POLE_ARRIVED_PCT) is de robot thuis: klep open → LOSSEN.
+        elif auto_state == AUTO_DRIVE_HOME:
+            if _yellow_zone is None:
+                print("[auto] DRIVE_HOME: gele paal kwijt → SEARCH_HOME")
+                auto_state = AUTO_SEARCH_HOME
+                await asyncio.sleep(0.05)
                 continue
 
-            # ── Timeout fallback ─────────────────────────────────────────────
-            elapsed = time.time() - _ts_t_start
-            if elapsed > _TS_TIMEOUT:
+            yx, yy, yw, yh = _yellow_zone
+            pole_cx     = yx + yw // 2
+            pole_bottom = yy + yh
+            arrived_y   = int(_auto_frame_h * HOME_POLE_ARRIVED_PCT / 100) if _auto_frame_h > 0 else 9999
+
+            # Thuis: onderkant paal voorbij de groene trigger-lijn
+            if pole_bottom >= arrived_y:
                 write_drive_cmd(0.0, 0.0, 0.0)
-                print(f"[auto] TO_START: timeout na {_TS_TIMEOUT}s → LOSSEN")
+                print("[auto] DRIVE_HOME: gele paal bereikt (HOME) → LOSSEN")
                 auto_state = AUTO_LOSSEN
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
                 continue
 
-            # ── Klaar? ───────────────────────────────────────────────────────
-            if dist < _HOME_DONE_XY and abs(th_err) < _HOME_DONE_TH:
+            # Rij naar paal, omega corrigeert heading
+            error = (pole_cx - _auto_frame_w // 2) / max(_auto_frame_w // 2, 1)
+            omega = 0.0 if abs(error) < HOME_POLE_ERROR_DEADBAND else \
+                    max(-HOME_POLE_MAX_OMEGA, min(HOME_POLE_MAX_OMEGA, -HOME_POLE_K_OMEGA * error))
+            write_drive_cmd(HOME_POLE_DRIVE_SPEED, 0.0, omega)
+
+            # Motor stuck tijdens rijden → terug naar zoekfase
+            if _motor_stuck_update(HOME_POLE_DRIVE_SPEED, 0.0):
                 write_drive_cmd(0.0, 0.0, 0.0)
-                print(f"[auto] TO_START: startpositie bereikt (dist={dist:.3f}m) → LOSSEN")
-                auto_state = AUTO_LOSSEN
-                await asyncio.sleep(0.1)
-                continue
+                print("[auto] DRIVE_HOME: vast → SEARCH_HOME")
+                auto_state = AUTO_SEARCH_HOME
 
-            # ── Holonomische P-regelaar: world-frame → robot-frame ───────────
-            speed    = min(_HOME_MAX_SPD, _HOME_K_POS * dist)
-            vx_w     = (-px / dist) * speed
-            vy_w     = (-py / dist) * speed
-
-            cos_h = math.cos(pth)
-            sin_h = math.sin(pth)
-            vx_r  = vx_w * cos_h + vy_w * sin_h
-            vy_r  = -vx_w * sin_h + vy_w * cos_h
-
-            omega = 0.0 if abs(th_err) < _HOME_OMEGA_DEADBAND else \
-                    max(-_HOME_MAX_OMG, min(_HOME_MAX_OMG, _HOME_K_OMEGA * th_err))
-
-            write_drive_cmd(vx_r, vy_r, omega)
-
-            await _broadcast(f"home:dist:{dist:.3f},{math.degrees(pth):.1f}")
             await asyncio.sleep(0.05)
 
         # ── LOSSEN ───────────────────────────────────────────────────────────
