@@ -85,7 +85,9 @@ AUTO_CENTER_PICKUP      = "centerPickup"  # draai robot zodat beker perfect gece
 AUTO_PICKUP             = "pickup"      # opraap routine starten (optellen aantal bekers)
 AUTO_TO_START           = "toStartPos"  # terug naar start positie rijden -> als robot x aantal bekers opgepakt heeft
 AUTO_LOSSEN             = "lossen"      # laad klep open zetten
+AUTO_PAUSED             = "paused"      # state machine op pauze (rijdt niet)
 auto_state              = AUTO_IDLE
+_auto_paused            = False         # pauze-vlag (True = bevroren)
 
 # ============================================================
 # AUTO STATE MACHINE — gedeelde data met vision_loop
@@ -314,16 +316,90 @@ def _read_ultra():
     return int(d1), int(d2)
 
 # ---- Obstacle avoidance drempelwaarden (cm) ----
-# d1 = linker sensor, d2 = rechter sensor (beide aan voorzijde).
+# d1 = rechter sensor, d2 = linker sensor (fysiek omgedraaid).
 ULTRA_SAFE_CM        = 15    # hard stop — blokkeer vooruitrijden
 ULTRA_WARN_CM        = 30    # vertraagzone — vx lineair afschalen
 ULTRA_DODGE_CM       = 20    # ontwijkdrempel — start zijdelingse dodge
 ULTRA_DODGE_SPD      = 0.6   # [m/s] zijdelingse ontwijksnelheid
 ULTRA_DODGE_VX_SCALE = 0.3   # vx-reductie factor tijdens dodge
 ULTRA_CLEAR_TIME     = 1.5   # [s] BEIDE sensoren vrij voor vrijgave richting
+ULTRA_STUCK_TIME     = 0.5   # [s] wacht voor stuck-check na starten dodge
+ULTRA_STUCK_MIN_TICKS = 30   # min. encoder strafe-ticks in ULTRA_STUCK_TIME (anders = vast)
 
-_ultra_dodge_hold_dir = 0    # 1=links, -1=rechts, 0=inactief
-_ultra_dodge_clear_t  = 0.0  # tijdstip waarop beide sensoren voor het eerst vrij waren
+_ultra_dodge_hold_dir  = 0    # 1=links, -1=rechts, 0=inactief
+_ultra_dodge_clear_t   = 0.0  # tijdstip waarop beide sensoren voor het eerst vrij waren
+_ultra_dodge_start_t   = 0.0  # tijdstip waarop huidige dodge-richting gekozen is
+_ultra_dodge_enc_snap  = 0    # encoder strafe-waarde bij start van stuck-check interval
+
+# Encoder-tekens (identiek aan odometry.py)
+_ENC_DRIVE_SIGNS = [-1, 1, -1, 1]
+
+def _read_strafe_enc() -> int:
+    """Leest strafe-component uit rijwiel-encoders (raw ticks, signed).
+    strafe ∝ (raw[0] + raw[1] - raw[2] - raw[3])  na sign-correctie.
+    Positief = strafe rechts, negatief = strafe links.
+    """
+    vals = []
+    for i in range(4):
+        _enc_mem_g.seek(i * 8)
+        raw = struct.unpack('q', _enc_mem_g.read(8))[0]
+        vals.append(raw * _ENC_DRIVE_SIGNS[i])
+    # strafe = -d0 + d1 + d2 - d3
+    return -vals[0] + vals[1] + vals[2] - vals[3]
+
+def _read_total_enc() -> int:
+    """Som van absolute encoder-waarden voor alle 4 rijwielen (maat voor totale beweging)."""
+    total = 0
+    for i in range(4):
+        _enc_mem_g.seek(i * 8)
+        raw = struct.unpack('q', _enc_mem_g.read(8))[0]
+        total += abs(raw)
+    return total
+
+# ---- Motor stuck detectie ----
+# Ruime drempel: als robot beweegcommando krijgt maar wielen staan stil → vast
+MOTOR_STUCK_TIME      = 0.4    # [s] hoe lang wachten voor stuck-check
+MOTOR_STUCK_MIN_TICKS = 15     # min. totale encoder-ticks in MOTOR_STUCK_TIME (ruim)
+MOTOR_STUCK_CMD_MIN   = 0.15   # min. gecombineerde |vx|+|vy| om check te activeren
+
+_motor_stuck_t    = 0.0   # tijdstip waarop bewegingscommando begon
+_motor_stuck_snap = 0     # encoder totaal bij start van check-venster
+
+def _motor_stuck_update(vx: float, vy: float) -> bool:
+    """Controleer of de motoren bewegen terwijl dat wel verwacht wordt.
+
+    Geeft True als de robot vast lijkt te zitten (commando maar geen beweging).
+    Moet elke control-tick (~50 ms) aangeroepen worden.
+    """
+    global _motor_stuck_t, _motor_stuck_snap
+
+    moving_cmd = (abs(vx) + abs(vy)) > MOTOR_STUCK_CMD_MIN
+
+    if not moving_cmd:
+        # Geen rijcommando → reset venster
+        _motor_stuck_t    = 0.0
+        _motor_stuck_snap = _read_total_enc()
+        return False
+
+    now = time.time()
+    if _motor_stuck_t == 0.0:
+        # Start nieuw meetvenster
+        _motor_stuck_t    = now
+        _motor_stuck_snap = _read_total_enc()
+        return False
+
+    if now - _motor_stuck_t < MOTOR_STUCK_TIME:
+        return False   # venster nog niet vol
+
+    # Venster vol: check beweging
+    delta = abs(_read_total_enc() - _motor_stuck_snap)
+    _motor_stuck_t    = now            # volgende venster
+    _motor_stuck_snap = _read_total_enc()
+
+    if delta < MOTOR_STUCK_MIN_TICKS:
+        print(f"[motor-stuck] Δticks={delta} < {MOTOR_STUCK_MIN_TICKS} → vast!")
+        return True
+    return False
 
 def _apply_avoidance(vx: float, vy: float, omega: float):
     """Schaal vx terug o.b.v. ultrasoonwaarden. 0 = geen data → geen ingreep."""
@@ -355,6 +431,7 @@ def _ultra_dodge_vy(cup_cx: int | None = None, frame_w: int = 320) -> float:
       vy [m/s], positief = links, negatief = rechts, 0.0 = geen dodge.
     """
     global _ultra_dodge_hold_dir, _ultra_dodge_clear_t
+    global _ultra_dodge_start_t, _ultra_dodge_enc_snap
 
     # Sensoren zijn fysiek omgedraaid: d1=rechts, d2=links
     s_right = _ultra_d1 if _ultra_d1 > 0 else 9999
@@ -363,6 +440,26 @@ def _ultra_dodge_vy(cup_cx: int | None = None, frame_w: int = 320) -> float:
 
     if _ultra_dodge_hold_dir != 0:
         # ── Al een richting actief ────────────────────────────────────────
+
+        # Stuck-check: na ULTRA_STUCK_TIME meten of robot daadwerkelijk bewoog
+        now = time.time()
+        if (now - _ultra_dodge_start_t) >= ULTRA_STUCK_TIME:
+            strafe_now  = _read_strafe_enc()
+            delta_ticks = abs(strafe_now - _ultra_dodge_enc_snap)
+            if delta_ticks < ULTRA_STUCK_MIN_TICKS:
+                # Robot beweegt niet → vast tegen zijkant, draai richting om
+                _ultra_dodge_hold_dir = -_ultra_dodge_hold_dir
+                _ultra_dodge_enc_snap = strafe_now
+                _ultra_dodge_start_t  = now
+                _ultra_dodge_clear_t  = 0.0
+                print(f"[dodge] VAST gedetecteerd (Δticks={delta_ticks}) → "
+                      f"omgekeerd naar {'links' if _ultra_dodge_hold_dir>0 else 'rechts'}")
+            else:
+                # Wel bewogen: snapshot vernieuwen voor volgende check
+                _ultra_dodge_enc_snap = strafe_now
+                _ultra_dodge_start_t  = now
+
+        # Vrijgave-timer: alleen vrijgeven als BEIDE sensoren lang genoeg vrij
         if both_clear:
             if _ultra_dodge_clear_t == 0.0:
                 _ultra_dodge_clear_t = time.time()
@@ -396,6 +493,8 @@ def _ultra_dodge_vy(cup_cx: int | None = None, frame_w: int = 320) -> float:
 
     _ultra_dodge_hold_dir = dir_choice
     _ultra_dodge_clear_t  = 0.0
+    _ultra_dodge_start_t  = time.time()
+    _ultra_dodge_enc_snap = _read_strafe_enc()
     print(f"[dodge] {'links' if dir_choice>0 else 'rechts'} o.b.v. {reden}")
     return ULTRA_DODGE_SPD if _ultra_dodge_hold_dir > 0 else -ULTRA_DODGE_SPD
 
@@ -765,6 +864,7 @@ async def handle_control_ws(reader, writer, request):
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
     global _vision_debug_step, auto_state, _cup_detection_enabled
     global CUP_IGNORE_TOP_PCT, CUP_BOTTOM_TRIGGER_PCT, AUTO_MAX_CUPS
+    global _auto_paused, _motor_stuck_t, _motor_stuck_snap
 
     writer.write(_ws_handshake(request).encode())
     await writer.drain()
@@ -824,10 +924,25 @@ async def handle_control_ws(reader, writer, request):
             elif msg == "auto_stop":
                 # Zet state terug naar IDLE en stop rijden
                 if robot_mode == MODE_AUTO:
-                    auto_state = AUTO_IDLE
+                    auto_state   = AUTO_IDLE
+                    _auto_paused = False
                     write_drive_cmd(0.0, 0.0, 0.0)
                     print("[brain] auto_stop → IDLE")
                     await _ws_send_text(writer, f"auto_state:{auto_state}")
+                    await _ws_send_text(writer, "paused:false")
+
+            elif msg == "auto_pause":
+                if robot_mode == MODE_AUTO and not _auto_paused:
+                    _auto_paused = True
+                    write_drive_cmd(0.0, 0.0, 0.0)
+                    print("[brain] auto PAUZE")
+                    await _broadcast("paused:true")
+
+            elif msg == "auto_resume":
+                if robot_mode == MODE_AUTO and _auto_paused:
+                    _auto_paused = False
+                    print("[brain] auto HERVAT")
+                    await _broadcast("paused:false")
 
             elif msg == "set_mode:home":
                 robot_mode  = MODE_HOME
@@ -1252,13 +1367,20 @@ async def _drive_straight(distance: float, speed: float):
 async def auto_loop():
     global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
     global _last_target, _target_lost_n, _last_dir_pos
-    global _ultra_dodge_hold_dir, _ultra_dodge_clear_t
+    global _ultra_dodge_hold_dir, _ultra_dodge_clear_t, _ultra_dodge_start_t, _ultra_dodge_enc_snap
+    global _auto_paused
     _prev_state = None
 
     while True:
         if robot_mode != MODE_AUTO:
             _prev_state = None
-            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0
+            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0; _ultra_dodge_start_t = 0.0
+            await asyncio.sleep(0.05)
+            continue
+
+        # ── Pauze ────────────────────────────────────────────────────────────
+        if _auto_paused:
+            write_drive_cmd(0.0, 0.0, 0.0)
             await asyncio.sleep(0.05)
             continue
 
@@ -1282,7 +1404,7 @@ async def auto_loop():
             _last_target          = None   # tracking schoon starten
             _target_lost_n        = 0
             _last_dir_pos         = False
-            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0
+            _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0; _ultra_dodge_start_t = 0.0
             _klep_dicht()
             print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
             auto_state = AUTO_SEARCH
@@ -1369,6 +1491,25 @@ async def auto_loop():
             vy = vy_dodge
 
             write_drive_cmd(vx, vy, omega)
+
+            # Motor-stuck check: rijcommando maar wielen staan stil → kies andere kant
+            if _motor_stuck_update(vx, vy):
+                if _ultra_dodge_hold_dir != 0:
+                    _ultra_dodge_hold_dir = -_ultra_dodge_hold_dir
+                    _ultra_dodge_start_t  = time.time()
+                    _ultra_dodge_enc_snap = _read_strafe_enc()
+                    _ultra_dodge_clear_t  = 0.0
+                    print(f"[motor-stuck] dodge omgedraaid → "
+                          f"{'links' if _ultra_dodge_hold_dir>0 else 'rechts'}")
+                else:
+                    # Nog geen dodge actief: start er één richting cup
+                    _ultra_dodge_hold_dir = -1 if (cx > _auto_frame_w // 2) else 1
+                    _ultra_dodge_start_t  = time.time()
+                    _ultra_dodge_enc_snap = _read_strafe_enc()
+                    _ultra_dodge_clear_t  = 0.0
+                    print(f"[motor-stuck] nieuw dodge gestart → "
+                          f"{'links' if _ultra_dodge_hold_dir>0 else 'rechts'}")
+
             await asyncio.sleep(0.05)
 
         # ── CENTER PICKUP ─────────────────────────────────────────────────────
