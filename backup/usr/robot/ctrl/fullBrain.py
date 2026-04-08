@@ -356,14 +356,34 @@ def _read_total_enc() -> int:
         total += abs(raw)
     return total
 
+def _read_rotation_enc() -> int:
+    """Rotatie-component uit rijwiel-encoders (signed ticks).
+    rotatie ∝ -d0 + d1 - d2 + d3  (na sign-correctie).
+    Positief = CCW, negatief = CW.
+    """
+    vals = []
+    for i in range(4):
+        _enc_mem_g.seek(i * 8)
+        raw = struct.unpack('q', _enc_mem_g.read(8))[0]
+        vals.append(raw * _ENC_DRIVE_SIGNS[i])
+    return -vals[0] + vals[1] - vals[2] + vals[3]
+
 # ---- Motor stuck detectie ----
-# Motor-stuck detectie drempelwaarden
+# Motor-stuck detectie drempelwaarden (translatie)
 MOTOR_STUCK_TIME      = 0.8    # [s] meetvenster voor stuck-check
 MOTOR_STUCK_MIN_TICKS = 80     # min. totale encoder-ticks in meetvenster (anders = vast)
 MOTOR_STUCK_CMD_MIN   = 0.25   # min. gecombineerde |vx|+|vy| om check te activeren
 
 _motor_stuck_t    = 0.0   # tijdstip waarop bewegingscommando begon
 _motor_stuck_snap = 0     # encoder totaal bij start van check-venster
+
+# Motor-stuck detectie drempelwaarden (rotatie)
+ROT_STUCK_TIME      = 0.8    # [s] meetvenster rotatie-check
+ROT_STUCK_MIN_TICKS = 60     # min. rotatie-encoder ticks in meetvenster (anders = vast)
+ROT_STUCK_CMD_MIN   = 0.3    # min. |omega| om check te activeren
+
+_rot_stuck_t    = 0.0   # tijdstip waarop omega-commando begon
+_rot_stuck_snap = 0     # rotatie-encoder waarde bij start check-venster
 
 def _motor_stuck_update(vx: float, vy: float) -> bool:
     """Controleer of de motoren bewegen terwijl dat wel verwacht wordt.
@@ -398,6 +418,37 @@ def _motor_stuck_update(vx: float, vy: float) -> bool:
 
     if delta < MOTOR_STUCK_MIN_TICKS:
         print(f"[motor-stuck] Δticks={delta} < {MOTOR_STUCK_MIN_TICKS} → vast!")
+        return True
+    return False
+
+def _motor_stuck_update_rot(omega: float) -> bool:
+    """Controleer of de robot draait terwijl een omega-commando actief is.
+
+    Geeft True als de rotatie-encoders nauwelijks bewegen (robot vastzittend
+    bij draaien). Moet elke control-tick (~50 ms) aangeroepen worden.
+    """
+    global _rot_stuck_t, _rot_stuck_snap
+
+    if abs(omega) < ROT_STUCK_CMD_MIN:
+        _rot_stuck_t    = 0.0
+        _rot_stuck_snap = _read_rotation_enc()
+        return False
+
+    now = time.time()
+    if _rot_stuck_t == 0.0:
+        _rot_stuck_t    = now
+        _rot_stuck_snap = _read_rotation_enc()
+        return False
+
+    if now - _rot_stuck_t < ROT_STUCK_TIME:
+        return False
+
+    delta = abs(_read_rotation_enc() - _rot_stuck_snap)
+    _rot_stuck_t    = now
+    _rot_stuck_snap = _read_rotation_enc()
+
+    if delta < ROT_STUCK_MIN_TICKS:
+        print(f"[rot-stuck] Δticks={delta} < {ROT_STUCK_MIN_TICKS} → vast bij draaien!")
         return True
     return False
 
@@ -1368,13 +1419,14 @@ async def auto_loop():
     global auto_state, _auto_bekers, _auto_frame_w, _auto_cup_count, robot_mode, _cup_touching_gripper
     global _last_target, _target_lost_n, _last_dir_pos
     global _ultra_dodge_hold_dir, _ultra_dodge_clear_t, _ultra_dodge_start_t, _ultra_dodge_enc_snap
-    global _auto_paused
+    global _auto_paused, _rot_stuck_t, _rot_stuck_snap, _motor_stuck_t, _motor_stuck_snap
     _prev_state = None
 
     while True:
         if robot_mode != MODE_AUTO:
             _prev_state = None
             _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0; _ultra_dodge_start_t = 0.0
+            _rot_stuck_t = 0.0; _motor_stuck_t = 0.0
             await asyncio.sleep(0.05)
             continue
 
@@ -1405,6 +1457,7 @@ async def auto_loop():
             _target_lost_n        = 0
             _last_dir_pos         = False
             _ultra_dodge_hold_dir = 0; _ultra_dodge_clear_t = 0.0; _ultra_dodge_start_t = 0.0
+            _rot_stuck_t = 0.0; _motor_stuck_t = 0.0
             _klep_dicht()
             print("[auto] INIT: tellers gereset, klep dicht → SEARCH")
             auto_state = AUTO_SEARCH
@@ -1420,7 +1473,11 @@ async def auto_loop():
                 print("[auto] SEARCH: beker gevonden → DRIVE_TARGET")
                 auto_state = AUTO_DRIVE_TRAGET
             else:
-                write_drive_cmd(0.0, 0.0, SEARCH_OMEGA)
+                search_omega = SEARCH_OMEGA if not _last_dir_pos else -SEARCH_OMEGA
+                write_drive_cmd(0.0, 0.0, search_omega)
+                if _motor_stuck_update_rot(search_omega):
+                    _last_dir_pos = not _last_dir_pos
+                    print("[auto] SEARCH: vast bij draaien → richting omgedraaid")
             await asyncio.sleep(0.05)
 
         # ── DRIVE TARGET ─────────────────────────────────────────────────────
@@ -1539,6 +1596,10 @@ async def auto_loop():
                     # Alleen draaien op de plek, niet rijden
                     omega = max(-MAX_OMEGA * 0.5, min(MAX_OMEGA * 0.5, -K_OMEGA * error))
                     write_drive_cmd(0.0, 0.0, omega)
+                    if _motor_stuck_update_rot(omega):
+                        write_drive_cmd(0.0, 0.0, 0.0)
+                        print("[auto] CENTER_PICKUP: vast bij draaien → toch DRIVE_PICKUP")
+                        auto_state = AUTO_DRIVE_PICKUP
             else:
                 # Beker niet meer zichtbaar (bijv. te dichtbij) → toch doorgaan
                 write_drive_cmd(0.0, 0.0, 0.0)

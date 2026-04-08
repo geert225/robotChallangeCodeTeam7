@@ -110,14 +110,22 @@
   }
   .cup-icon.filled { background: #3fb950; border-color: #56d364; }
   #auto-cups-label { font-size: 0.82em; color: #8b949e; }
+  #auto-btns { display: flex; gap: 6px; margin-left: auto; }
   #btn-auto-start {
     background: #238636; color: #fff; border: none; border-radius: 8px;
     padding: 6px 16px; font-size: 0.88em; font-weight: bold;
-    cursor: pointer; margin-left: auto;
-    transition: background 0.2s;
+    cursor: pointer; transition: background 0.2s;
   }
   #btn-auto-start:hover { background: #2ea043; }
   #btn-auto-start:disabled { opacity: 0.4; cursor: default; }
+  #btn-auto-pause {
+    background: #b45309; color: #fff; border: none; border-radius: 8px;
+    padding: 6px 14px; font-size: 0.88em; font-weight: bold;
+    cursor: pointer; display: none; transition: background 0.2s;
+  }
+  #btn-auto-pause:hover { background: #d97706; }
+  #btn-auto-pause.paused { background: #1f6feb; }
+  #btn-auto-pause.paused:hover { background: #388bfd; }
 
   /* ── Main layout ─────────────────────────────────────────────── */
   #main { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -250,7 +258,10 @@
              oninput="sliderVal('sl-max-cups','sv-max-cups'); send('set_max_cups:'+this.value)">
       <span style="font-size:0.85em;font-weight:bold;color:#3fb950;min-width:14px;" id="sv-max-cups">3</span>
     </div>
-    <button id="btn-auto-start" onclick="autoStartStop()">&#9654; Start</button>
+    <div id="auto-btns">
+      <button id="btn-auto-pause" onclick="autoPause()">&#9646;&#9646; Pauze</button>
+      <button id="btn-auto-start" onclick="autoStartStop()">&#9654; Start</button>
+    </div>
   </div>
 </div>
 <div id="home-info" class="info-bar">
@@ -749,6 +760,8 @@ ws.onmessage = (e) => {
     AUTO_MAX_CUPS = parseInt(d.slice(9));
     setSlider("sl-max-cups", "sv-max-cups", AUTO_MAX_CUPS);
     applyAutoCups(autoCups);
+  } else if (d.startsWith("paused:")) {
+    applyPaused(d.slice(7) === "true");
   } else if (d.startsWith("klep:")) {
     applyKlep(d.slice(5));
   } else if (d.startsWith("obstacles:")) {
@@ -868,6 +881,8 @@ function applyAutoState(state) {
     startBtn.textContent = "\u23F9 Stop";
     startBtn.disabled    = false;
   }
+  updatePauseBtn(state);
+  if (state === "idle") applyPaused(false);
 }
 
 function applyAutoCups(n) {
@@ -884,12 +899,40 @@ function applyAutoCups(n) {
   }
 }
 
+let autoPaused = false;
+
 function autoStartStop() {
   if (autoState === "idle") {
     send("auto_start");
   } else {
     send("auto_stop");
   }
+}
+
+function autoPause() {
+  if (autoPaused) {
+    send("auto_resume");
+  } else {
+    send("auto_pause");
+  }
+}
+
+function applyPaused(paused) {
+  autoPaused = paused;
+  const btn = document.getElementById("btn-auto-pause");
+  if (paused) {
+    btn.textContent = "▶ Hervat";
+    btn.classList.add("paused");
+  } else {
+    btn.innerHTML = "&#9646;&#9646; Pauze";
+    btn.classList.remove("paused");
+  }
+}
+
+function updatePauseBtn(state) {
+  const btn = document.getElementById("btn-auto-pause");
+  // Toon pauze-knop alleen als auto actief is (niet idle)
+  btn.style.display = (state !== "idle") ? "inline-block" : "none";
 }
 
 // ── HOME strategie ────────────────────────────────────────────
