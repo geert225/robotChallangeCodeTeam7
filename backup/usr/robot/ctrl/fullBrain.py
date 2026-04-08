@@ -1769,7 +1769,7 @@ async def auto_loop():
             write_drive_cmd(0.0, 0.0, 0.0)
             _klep_open()
             print("[auto] LOSSEN: klep open, bekers lossen...")
-            await asyncio.sleep(3.0)   # TODO: pas duur aan op basis van hardware
+            await asyncio.sleep(15.0)   # TODO: pas duur aan op basis van hardware
             _klep_dicht()
             print("[auto] LOSSEN: klep dicht → IDLE")
             auto_state = AUTO_IDLE
