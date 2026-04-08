@@ -370,55 +370,58 @@ def _read_rotation_enc() -> int:
 
 # ---- Motor stuck detectie ----
 # Motor-stuck detectie drempelwaarden (translatie)
-MOTOR_STUCK_TIME      = 0.8    # [s] meetvenster voor stuck-check
-MOTOR_STUCK_MIN_TICKS = 80     # min. totale encoder-ticks in meetvenster (anders = vast)
+MOTOR_STUCK_TIME      = 0.8    # [s] meetvenster per check
+MOTOR_STUCK_MIN_TICKS = 80     # min. totale encoder-ticks per venster (anders = vast)
 MOTOR_STUCK_CMD_MIN   = 0.25   # min. gecombineerde |vx|+|vy| om check te activeren
+MOTOR_STUCK_CONFIRMS  = 2      # aantal opeenvolgende "vast"-vensters voor trigger
 
-_motor_stuck_t    = 0.0   # tijdstip waarop bewegingscommando begon
-_motor_stuck_snap = 0     # encoder totaal bij start van check-venster
+_motor_stuck_t      = 0.0
+_motor_stuck_snap   = 0
+_motor_stuck_count  = 0        # aaneengesloten "vast"-vensters teller
 
 # Motor-stuck detectie drempelwaarden (rotatie)
-ROT_STUCK_TIME      = 0.8    # [s] meetvenster rotatie-check
-ROT_STUCK_MIN_TICKS = 60     # min. rotatie-encoder ticks in meetvenster (anders = vast)
+ROT_STUCK_TIME      = 0.8    # [s] meetvenster per check
+ROT_STUCK_MIN_TICKS = 60     # min. rotatie-encoder ticks per venster (anders = vast)
 ROT_STUCK_CMD_MIN   = 0.3    # min. |omega| om check te activeren
+ROT_STUCK_CONFIRMS  = 2      # aantal opeenvolgende "vast"-vensters voor trigger
 
-_rot_stuck_t    = 0.0   # tijdstip waarop omega-commando begon
-_rot_stuck_snap = 0     # rotatie-encoder waarde bij start check-venster
+_rot_stuck_t     = 0.0
+_rot_stuck_snap  = 0
+_rot_stuck_count = 0           # aaneengesloten "vast"-vensters teller
 
 def _motor_stuck_update(vx: float, vy: float) -> bool:
-    """Controleer of de motoren bewegen terwijl dat wel verwacht wordt.
+    """Geeft True als de robot MOTOR_STUCK_CONFIRMS opeenvolgende vensters vast zit."""
+    global _motor_stuck_t, _motor_stuck_snap, _motor_stuck_count
 
-    Geeft True als de robot vast lijkt te zitten (commando maar geen beweging).
-    Moet elke control-tick (~50 ms) aangeroepen worden.
-    """
-    global _motor_stuck_t, _motor_stuck_snap
-
-    moving_cmd = (abs(vx) + abs(vy)) > MOTOR_STUCK_CMD_MIN
-
-    if not moving_cmd:
-        # Geen rijcommando → reset venster
-        _motor_stuck_t    = 0.0
-        _motor_stuck_snap = _read_total_enc()
+    if (abs(vx) + abs(vy)) <= MOTOR_STUCK_CMD_MIN:
+        _motor_stuck_t     = 0.0
+        _motor_stuck_snap  = _read_total_enc()
+        _motor_stuck_count = 0
         return False
 
     now = time.time()
     if _motor_stuck_t == 0.0:
-        # Start nieuw meetvenster
-        _motor_stuck_t    = now
-        _motor_stuck_snap = _read_total_enc()
+        _motor_stuck_t     = now
+        _motor_stuck_snap  = _read_total_enc()
+        _motor_stuck_count = 0
         return False
 
     if now - _motor_stuck_t < MOTOR_STUCK_TIME:
-        return False   # venster nog niet vol
+        return False
 
-    # Venster vol: check beweging
     delta = abs(_read_total_enc() - _motor_stuck_snap)
-    _motor_stuck_t    = now            # volgende venster
+    _motor_stuck_t    = now
     _motor_stuck_snap = _read_total_enc()
 
     if delta < MOTOR_STUCK_MIN_TICKS:
-        print(f"[motor-stuck] Δticks={delta} < {MOTOR_STUCK_MIN_TICKS} → vast!")
-        return True
+        _motor_stuck_count += 1
+        print(f"[motor-stuck] venster {_motor_stuck_count}/{MOTOR_STUCK_CONFIRMS}"
+              f"  Δticks={delta}")
+        if _motor_stuck_count >= MOTOR_STUCK_CONFIRMS:
+            _motor_stuck_count = 0
+            return True
+    else:
+        _motor_stuck_count = 0
     return False
 
 def _motor_stuck_update_rot(omega: float) -> bool:
@@ -427,17 +430,19 @@ def _motor_stuck_update_rot(omega: float) -> bool:
     Geeft True als de rotatie-encoders nauwelijks bewegen (robot vastzittend
     bij draaien). Moet elke control-tick (~50 ms) aangeroepen worden.
     """
-    global _rot_stuck_t, _rot_stuck_snap
+    global _rot_stuck_t, _rot_stuck_snap, _rot_stuck_count
 
     if abs(omega) < ROT_STUCK_CMD_MIN:
-        _rot_stuck_t    = 0.0
-        _rot_stuck_snap = _read_rotation_enc()
+        _rot_stuck_t     = 0.0
+        _rot_stuck_snap  = _read_rotation_enc()
+        _rot_stuck_count = 0
         return False
 
     now = time.time()
     if _rot_stuck_t == 0.0:
-        _rot_stuck_t    = now
-        _rot_stuck_snap = _read_rotation_enc()
+        _rot_stuck_t     = now
+        _rot_stuck_snap  = _read_rotation_enc()
+        _rot_stuck_count = 0
         return False
 
     if now - _rot_stuck_t < ROT_STUCK_TIME:
@@ -448,8 +453,14 @@ def _motor_stuck_update_rot(omega: float) -> bool:
     _rot_stuck_snap = _read_rotation_enc()
 
     if delta < ROT_STUCK_MIN_TICKS:
-        print(f"[rot-stuck] Δticks={delta} < {ROT_STUCK_MIN_TICKS} → vast bij draaien!")
-        return True
+        _rot_stuck_count += 1
+        print(f"[rot-stuck] venster {_rot_stuck_count}/{ROT_STUCK_CONFIRMS}"
+              f"  Δticks={delta}")
+        if _rot_stuck_count >= ROT_STUCK_CONFIRMS:
+            _rot_stuck_count = 0
+            return True
+    else:
+        _rot_stuck_count = 0
     return False
 
 def _apply_avoidance(vx: float, vy: float, omega: float):
