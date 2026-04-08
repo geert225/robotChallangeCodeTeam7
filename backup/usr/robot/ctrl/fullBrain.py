@@ -357,10 +357,10 @@ def _read_total_enc() -> int:
     return total
 
 # ---- Motor stuck detectie ----
-# Ruime drempel: als robot beweegcommando krijgt maar wielen staan stil → vast
-MOTOR_STUCK_TIME      = 0.4    # [s] hoe lang wachten voor stuck-check
-MOTOR_STUCK_MIN_TICKS = 15     # min. totale encoder-ticks in MOTOR_STUCK_TIME (ruim)
-MOTOR_STUCK_CMD_MIN   = 0.15   # min. gecombineerde |vx|+|vy| om check te activeren
+# Motor-stuck detectie drempelwaarden
+MOTOR_STUCK_TIME      = 0.8    # [s] meetvenster voor stuck-check
+MOTOR_STUCK_MIN_TICKS = 80     # min. totale encoder-ticks in meetvenster (anders = vast)
+MOTOR_STUCK_CMD_MIN   = 0.25   # min. gecombineerde |vx|+|vy| om check te activeren
 
 _motor_stuck_t    = 0.0   # tijdstip waarop bewegingscommando begon
 _motor_stuck_snap = 0     # encoder totaal bij start van check-venster
