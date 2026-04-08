@@ -93,7 +93,7 @@ auto_state              = AUTO_IDLE
 _auto_bekers: list  = []    # laatste beker-detecties (gevuld door vision_loop)
 _auto_frame_w: int  = 320   # frame breedte (gevuld door vision_loop)
 _auto_cup_count: int = 0    # aantal opgepakte bekers in huidige cyclus
-AUTO_MAX_CUPS        = 3    # instelbaar via web (set_max_cups:N), min 1 max 10
+AUTO_MAX_CUPS        = 5    # instelbaar via web (set_max_cups:N), min 1 max 10
 
 # ============================================================
 # SHARED MEMORY — SERVO (laadklep)
@@ -190,7 +190,7 @@ def _read_gripper_state() -> int:
 
 # Gripper snelheden (aanpasbaar via web, 0–100)
 gripper_jog_speed  = 30   # handmatige jog
-gripper_auto_speed = 60   # auto cyclus
+gripper_auto_speed = 100   # auto cyclus
 gripper_home_speed = 20   # vasthouden tijdens HOME
 
 # Encoder SHM (voor gripper-feedback, index 4)
@@ -337,40 +337,41 @@ def _apply_avoidance(vx: float, vy: float, omega: float):
             vx *= (front - ULTRA_SAFE_CM) / (ULTRA_WARN_CM - ULTRA_SAFE_CM)
     return vx, vy, omega
 
-def _ultra_dodge_vy() -> float:
-    """Zijdelingse ontwijksnelheid op basis van ultrasoon.
+def _ultra_dodge_vy(cup_cx: int | None = None, frame_w: int = 320) -> float:
+    """Zijdelingse ontwijksnelheid op basis van ultrasoon + camera.
 
-    Logica:
-      - Als een sensor te dichtbij is: kies de kant met de MEESTE ruimte
-        (kleinste waarde = meest geblokkeerd → dodge naar andere kant).
-      - Gekozen richting vasthouden totdat BEIDE sensoren vrij zijn
-        gedurende ULTRA_CLEAR_TIME seconden.
+    Richting-keuze (prioriteit):
+      1. Camera: obstakel zit tussen robot en cup → dodge NAAR de cup
+         (cup links → obstakel links → dodge rechts, en vice versa)
+      2. Sensor: ga naar de kant met de MEESTE ruimte (grootste waarde).
+      3. Default: rechts.
+
+    Opmerking: d1 = RECHTER sensor, d2 = LINKER sensor (fysiek omgedraaid).
+
+    Gekozen richting vasthouden totdat BEIDE sensoren vrij zijn
+    gedurende ULTRA_CLEAR_TIME seconden.
 
     Returns:
       vy [m/s], positief = links, negatief = rechts, 0.0 = geen dodge.
     """
     global _ultra_dodge_hold_dir, _ultra_dodge_clear_t
 
-    s1 = _ultra_d1 if _ultra_d1 > 0 else 9999   # linker sensor (d1)
-    s2 = _ultra_d2 if _ultra_d2 > 0 else 9999   # rechter sensor (d2)
-    both_clear = s1 > ULTRA_DODGE_CM and s2 > ULTRA_DODGE_CM
+    # Sensoren zijn fysiek omgedraaid: d1=rechts, d2=links
+    s_right = _ultra_d1 if _ultra_d1 > 0 else 9999
+    s_left  = _ultra_d2 if _ultra_d2 > 0 else 9999
+    both_clear = s_right > ULTRA_DODGE_CM and s_left > ULTRA_DODGE_CM
 
     if _ultra_dodge_hold_dir != 0:
         # ── Al een richting actief ────────────────────────────────────────
         if both_clear:
-            # Start vrijgave-timer als nog niet gestart
             if _ultra_dodge_clear_t == 0.0:
                 _ultra_dodge_clear_t = time.time()
             elif time.time() - _ultra_dodge_clear_t >= ULTRA_CLEAR_TIME:
-                # Lang genoeg vrij: richting vrijgeven
                 _ultra_dodge_hold_dir = 0
                 _ultra_dodge_clear_t  = 0.0
                 return 0.0
         else:
-            # Obstakel nog aanwezig: reset timer
             _ultra_dodge_clear_t = 0.0
-
-        # Richting nog actief
         return ULTRA_DODGE_SPD if _ultra_dodge_hold_dir > 0 else -ULTRA_DODGE_SPD
 
     # ── Geen actieve richting ─────────────────────────────────────────────
@@ -378,14 +379,24 @@ def _ultra_dodge_vy() -> float:
         _ultra_dodge_clear_t = 0.0
         return 0.0
 
-    # Obstakel gedetecteerd: kies kant met meeste ruimte
-    # s1 < s2 → links meer geblokkeerd → dodge rechts (-1)
-    # s1 > s2 → rechts meer geblokkeerd → dodge links (+1)
-    # s1 == s2 → default rechts
-    _ultra_dodge_hold_dir = 1 if s1 > s2 else -1
+    # Obstakel gedetecteerd: kies richting
+    # 1. Camera-hint: cup is het doel, dodge NAAR de cup toe
+    if cup_cx is not None and frame_w > 0:
+        cup_left = cup_cx < frame_w // 2   # cup links in beeld
+        # obstakel staat voor de cup → dodge naar kant van de cup
+        dir_choice = -1 if cup_left else 1   # cup links → dodge rechts (-1), cup rechts → links (+1)
+        reden = f"camera (cup {'links' if cup_left else 'rechts'})"
+    # 2. Sensor-hint: ga naar kant met meeste ruimte
+    elif s_left != s_right:
+        dir_choice = 1 if s_left > s_right else -1   # meer ruimte links → links (+1)
+        reden = f"sensor (links={s_left}cm rechts={s_right}cm)"
+    else:
+        dir_choice = -1   # default: rechts
+        reden = "default"
+
+    _ultra_dodge_hold_dir = dir_choice
     _ultra_dodge_clear_t  = 0.0
-    print(f"[dodge] richting gekozen: {'links' if _ultra_dodge_hold_dir>0 else 'rechts'}"
-          f"  (d1={s1}cm d2={s2}cm)")
+    print(f"[dodge] {'links' if dir_choice>0 else 'rechts'} o.b.v. {reden}")
     return ULTRA_DODGE_SPD if _ultra_dodge_hold_dir > 0 else -ULTRA_DODGE_SPD
 
 # ============================================================
@@ -462,7 +473,7 @@ PICKUP_MIN_CUP_AREA  = 2500  # beker moet groot genoeg zijn (dichtbij) om event 
 
 # Bovenkant van het frame negeren (% van frame hoogte, 0 = alles checken)
 # Bekers waarvan het middelpunt boven deze lijn valt worden genegeerd.
-CUP_IGNORE_TOP_PCT = 20   # instelbaar via web (set_ignore_top_pct:XX)
+CUP_IGNORE_TOP_PCT = 27   # instelbaar via web (set_ignore_top_pct:XX)
 
 # Onderkant-trigger: beker wordt als "gevangen" beschouwd zodra de onderkant
 # van de bbox deze lijn bereikt (% van frame hoogte vanaf bovenkant).
@@ -1351,8 +1362,8 @@ async def auto_loop():
             # Obstakel veiligheidscheck (kap vx bij obstakel voor)
             vx, _, omega = _apply_avoidance(vx, 0.0, omega)
 
-            # Ultrasoon zijdelingse dodge
-            vy_dodge = _ultra_dodge_vy()
+            # Ultrasoon zijdelingse dodge (camera-hint meegeven voor richting)
+            vy_dodge = _ultra_dodge_vy(cup_cx=cx, frame_w=_auto_frame_w)
             if vy_dodge != 0.0:
                 vx *= ULTRA_DODGE_VX_SCALE
             vy = vy_dodge
