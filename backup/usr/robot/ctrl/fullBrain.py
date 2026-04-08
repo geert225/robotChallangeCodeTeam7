@@ -431,35 +431,39 @@ def _motor_stuck_update(vx: float, vy: float) -> bool:
 def _motor_stuck_update_rot(omega: float) -> bool:
     """Controleer of de robot draait terwijl een omega-commando actief is.
 
-    Geeft True als de rotatie-encoders nauwelijks bewegen (robot vastzittend
-    bij draaien). Moet elke control-tick (~50 ms) aangeroepen worden.
+    Geeft True als de gyroscoop-yaw nauwelijks wijzigt terwijl omega actief is
+    (robot vastzittend bij draaien). Moet elke control-tick (~50 ms) aangeroepen worden.
     """
     global _rot_stuck_t, _rot_stuck_snap, _rot_stuck_count
 
+    cur_yaw = _read_pose()[2]   # theta [rad] uit odometry/Madgwick SHM
+
     if abs(omega) < ROT_STUCK_CMD_MIN:
         _rot_stuck_t     = 0.0
-        _rot_stuck_snap  = _read_rotation_enc()
+        _rot_stuck_snap  = cur_yaw
         _rot_stuck_count = 0
         return False
 
     now = time.time()
     if _rot_stuck_t == 0.0:
         _rot_stuck_t     = now
-        _rot_stuck_snap  = _read_rotation_enc()
+        _rot_stuck_snap  = cur_yaw
         _rot_stuck_count = 0
         return False
 
     if now - _rot_stuck_t < ROT_STUCK_TIME:
         return False
 
-    delta = abs(_read_rotation_enc() - _rot_stuck_snap)
+    # Wrap-veilige yaw-delta
+    delta = abs(math.atan2(math.sin(cur_yaw - _rot_stuck_snap),
+                            math.cos(cur_yaw - _rot_stuck_snap)))
     _rot_stuck_t    = now
-    _rot_stuck_snap = _read_rotation_enc()
+    _rot_stuck_snap = cur_yaw
 
-    if delta < ROT_STUCK_MIN_TICKS:
+    if delta < ROT_STUCK_MIN_RAD:
         _rot_stuck_count += 1
         print(f"[rot-stuck] venster {_rot_stuck_count}/{ROT_STUCK_CONFIRMS}"
-              f"  Δticks={delta}")
+              f"  Δyaw={math.degrees(delta):.2f}°")
         if _rot_stuck_count >= ROT_STUCK_CONFIRMS:
             _rot_stuck_count = 0
             return True
