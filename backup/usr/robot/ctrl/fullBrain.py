@@ -324,8 +324,9 @@ ULTRA_SAFE_CM        = 15    # hard stop — blokkeer vooruitrijden
 ULTRA_WARN_CM        = 30    # vertraagzone — vx lineair afschalen
 ULTRA_DODGE_CM       = 20    # ontwijkdrempel — start zijdelingse dodge
 ULTRA_DODGE_SPD      = 0.6   # [m/s] zijdelingse ontwijksnelheid
-ULTRA_DODGE_VX_SCALE = 0.3   # vx-reductie factor tijdens dodge
-ULTRA_CLEAR_TIME     = 1.5   # [s] BEIDE sensoren vrij voor vrijgave richting
+ULTRA_DODGE_VX_SCALE = 0.3   # vx-reductie factor tijdens dodge (ongebruikt tijdens schuin-achteruit)
+ULTRA_DODGE_VX_BACK  = 0.1#0.15  # [m/s] achteruitsnelheid tijdens dodge (schuin naar achter)
+ULTRA_CLEAR_TIME     = 2.5   # [s] BEIDE sensoren vrij voor vrijgave richting
 ULTRA_STUCK_TIME     = 0.5   # [s] wacht voor stuck-check na starten dodge
 ULTRA_STUCK_MIN_TICKS = 30   # min. encoder strafe-ticks in ULTRA_STUCK_TIME (anders = vast)
 
@@ -382,14 +383,14 @@ _motor_stuck_t      = 0.0
 _motor_stuck_snap   = 0
 _motor_stuck_count  = 0        # aaneengesloten "vast"-vensters teller
 
-# Motor-stuck detectie drempelwaarden (rotatie)
+# Motor-stuck detectie drempelwaarden (rotatie) — gyroscoop-gebaseerd
 ROT_STUCK_TIME      = 0.8    # [s] meetvenster per check
-ROT_STUCK_MIN_TICKS = 60     # min. rotatie-encoder ticks per venster (anders = vast)
+ROT_STUCK_MIN_RAD   = 0.06   # min. gyroverandering [rad] per venster (anders = vast)
 ROT_STUCK_CMD_MIN   = 0.3    # min. |omega| om check te activeren
 ROT_STUCK_CONFIRMS  = 2      # aantal opeenvolgende "vast"-vensters voor trigger
 
 _rot_stuck_t     = 0.0
-_rot_stuck_snap  = 0
+_rot_stuck_snap  = 0.0        # yaw-snapshot [rad] bij start van venster
 _rot_stuck_count = 0           # aaneengesloten "vast"-vensters teller
 
 def _motor_stuck_update(vx: float, vy: float) -> bool:
@@ -598,6 +599,35 @@ _vision_debug_step = "final"
 
 # Verbonden control-websocket clients (voor broadcast van ultrasoon-data)
 _control_clients: set = set()
+
+# ============================================================
+# LOG INTERCEPTOR  — stuurt print()-output naar WS-clients
+# ============================================================
+import sys as _sys
+
+_log_queue: list = []          # wachtrij voor log-regels (max 200)
+_LOG_QUEUE_MAX = 200
+
+class _WsBroadcastLogger:
+    """Vervangt sys.stdout: schrijft naar console én naar _log_queue."""
+    def __init__(self, original):
+        self._orig = original
+
+    def write(self, text: str):
+        self._orig.write(text)
+        stripped = text.strip()
+        if stripped:
+            if len(_log_queue) >= _LOG_QUEUE_MAX:
+                _log_queue.pop(0)
+            _log_queue.append(stripped)
+
+    def flush(self):
+        self._orig.flush()
+
+    def fileno(self):
+        return self._orig.fileno()
+
+_sys.stdout = _WsBroadcastLogger(_sys.stdout)
 
 # ============================================================
 # MANUAL RIJSTATUS
@@ -962,6 +992,11 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"bottom_trigger_pct:{CUP_BOTTOM_TRIGGER_PCT}")
     await _ws_send_text(writer, f"max_cups:{AUTO_MAX_CUPS}")
 
+    # Stuur de laatste 50 log-regels als history bij verbinding
+    history = _log_queue[-50:] if len(_log_queue) > 50 else list(_log_queue)
+    for line in history:
+        await _ws_send_text(writer, "log:" + line)
+
     try:
         while True:
             msg = await _ws_read_frame(reader)
@@ -1220,6 +1255,26 @@ async def heartbeat():
         await asyncio.sleep(0.05)
 
 # ============================================================
+# LOG BROADCAST LOOP  (stuurt nieuwe log-regels naar WS-clients, 10 Hz)
+# ============================================================
+_log_sent_idx = 0   # hoeveel regels al verstuurd
+
+async def log_loop():
+    global _log_sent_idx
+    while True:
+        if _control_clients and _log_sent_idx < len(_log_queue):
+            lines = _log_queue[_log_sent_idx:]
+            _log_sent_idx = len(_log_queue)
+            for line in lines:
+                msg = "log:" + line
+                for w in list(_control_clients):
+                    try:
+                        await _ws_send_text(w, msg)
+                    except Exception:
+                        _control_clients.discard(w)
+        await asyncio.sleep(0.1)
+
+# ============================================================
 # ULTRASOON LOOP  (leest SHM en broadcast naar alle WS-clients, 10 Hz)
 # ============================================================
 _ultra_obstacle_led_state = False   # huidige blink-toestand voor obstakel-LED
@@ -1338,10 +1393,13 @@ HOME_POLE_MAX_OMEGA      = 3.0    # [rad/s] max bijstuursnelheid
 HOME_POLE_ERROR_DEADBAND = 0.05   # bijstuur-deadband (relatief framewidth)
 HOME_POLE_ARRIVED_PCT    = 80     # [%] onderkant gele blob t.o.v. framehoogte = "thuis"
 
-# Escape maneuver bij vastzitten tijdens SEARCH_HOME
-HOME_STUCK_ROT_TIME      = 0.6    # [s] terugdraaien bij vastzitten
-HOME_STUCK_FWD_DIST      = 0.25   # [m] vooruitrijden na terugdraaien
-HOME_STUCK_FWD_SPEED     = 0.3    # [m/s] snelheid tijdens escape
+# Escape maneuver bij vastzitten tijdens zoek-draaiing (SEARCH + SEARCH_HOME)
+HOME_STUCK_ROT_TIME      = 0.6    # [s] terugdraaien bij vastzitten (legacy alias)
+HOME_STUCK_FWD_DIST      = 0.25   # [m] (legacy alias)
+HOME_STUCK_FWD_SPEED     = 0.3    # [m/s] (legacy alias)
+SEARCH_STUCK_ROT_TIME    = 0.6    # [s] terugdraaien bij vastzitten tijdens zoeken
+SEARCH_STUCK_DIST        = 0.25   # [m] voor-/achteruit rijden na terugdraaien
+SEARCH_STUCK_SPD         = 0.3    # [m/s] rijsnelheid escape
 
 def _angle_wrap(a: float) -> float:
     """Brengt hoek terug naar [-π, π]."""
@@ -1451,6 +1509,39 @@ async def _drive_straight(distance: float, speed: float):
 # AUTO LOOP  — state machine voor autonoom rijden (20 Hz)
 # _auto_bekers en _auto_frame_w worden gevuld door vision_loop.
 # ============================================================
+async def _rot_stuck_escape(search_omega: float):
+    """Escape-maneuver bij vastzitten tijdens rotatie-zoeken (SEARCH + SEARCH_HOME).
+
+    1. Draai terug (tegengestelde richting) voor SEARCH_STUCK_ROT_TIME.
+    2. Controleer ultrasoon-sensoren:
+       - Beide sensoren vrij  → rij vooruit  (weg van het obstakel achter ons).
+       - Obstakel gedetecteerd → rij achteruit (obstakel zit voor ons).
+    3. Stop, wissel zoekrichting.
+    """
+    global _last_dir_pos
+    # Check sensoren vóór de maneuver: s1=rechts, s2=links (fysiek omgedraaid)
+    s1 = _ultra_d1 if _ultra_d1 > 0 else 9999
+    s2 = _ultra_d2 if _ultra_d2 > 0 else 9999
+    front_clear = s1 > ULTRA_SAFE_CM and s2 > ULTRA_SAFE_CM
+
+    # Stap 1: draai terug
+    write_drive_cmd(0.0, 0.0, -search_omega)
+    await asyncio.sleep(SEARCH_STUCK_ROT_TIME)
+    write_drive_cmd(0.0, 0.0, 0.0)
+    await asyncio.sleep(0.1)
+
+    # Stap 2: rij voor- of achteruit
+    if front_clear:
+        print("[rot-escape] sensoren vrij → rij vooruit")
+        await _drive_straight(SEARCH_STUCK_DIST, SEARCH_STUCK_SPD)
+    else:
+        print("[rot-escape] obstakel voor → rij achteruit")
+        await _drive_straight(SEARCH_STUCK_DIST, -SEARCH_STUCK_SPD)
+
+    write_drive_cmd(0.0, 0.0, 0.0)
+    _last_dir_pos = not _last_dir_pos
+
+
 async def auto_loop():
     global auto_state, _auto_bekers, _auto_frame_w, _auto_frame_h, _auto_cup_count, robot_mode, _cup_touching_gripper
     global _last_target, _target_lost_n, _last_dir_pos
@@ -1512,8 +1603,9 @@ async def auto_loop():
                 search_omega = SEARCH_OMEGA if not _last_dir_pos else -SEARCH_OMEGA
                 write_drive_cmd(0.0, 0.0, search_omega)
                 if _motor_stuck_update_rot(search_omega):
-                    _last_dir_pos = not _last_dir_pos
-                    print("[auto] SEARCH: vast bij draaien → richting omgedraaid")
+                    print("[auto] SEARCH: vast bij draaien → escape maneuver")
+                    await _rot_stuck_escape(search_omega)
+                    print("[auto] SEARCH: escape klaar → hervatten zoeken")
             await asyncio.sleep(0.05)
 
         # ── DRIVE TARGET ─────────────────────────────────────────────────────
@@ -1580,7 +1672,8 @@ async def auto_loop():
             # Ultrasoon zijdelingse dodge (camera-hint meegeven voor richting)
             vy_dodge = _ultra_dodge_vy(cup_cx=cx, frame_w=_auto_frame_w)
             if vy_dodge != 0.0:
-                vx *= ULTRA_DODGE_VX_SCALE
+                # Schuin naar achter: negatieve vx zodat robot achteruitwijkt
+                vx = -ULTRA_DODGE_VX_BACK
             vy = vy_dodge
 
             write_drive_cmd(vx, vy, omega)
@@ -1715,13 +1808,7 @@ async def auto_loop():
 
             if _motor_stuck_update_rot(search_omega):
                 print("[auto] SEARCH_HOME: vast bij draaien → escape maneuver")
-                # Draai terug (tegengestelde richting)
-                write_drive_cmd(0.0, 0.0, -search_omega)
-                await asyncio.sleep(HOME_STUCK_ROT_TIME)
-                # Rij vooruit
-                await _drive_straight(HOME_STUCK_FWD_DIST, HOME_STUCK_FWD_SPEED)
-                write_drive_cmd(0.0, 0.0, 0.0)
-                _last_dir_pos = not _last_dir_pos
+                await _rot_stuck_escape(search_omega)
                 print("[auto] SEARCH_HOME: escape klaar → hervatten zoeken")
 
             await asyncio.sleep(0.05)
@@ -1764,9 +1851,30 @@ async def auto_loop():
             await asyncio.sleep(0.05)
 
         # ── LOSSEN ───────────────────────────────────────────────────────────
-        # Open laadklep, wacht tot bekers zijn gevallen, sluit klep → IDLE.
+        # Draai 180°, open laadklep, wacht tot bekers zijn gevallen, sluit klep → IDLE.
         elif auto_state == AUTO_LOSSEN:
             write_drive_cmd(0.0, 0.0, 0.0)
+
+            # ── 180° draaien via odometrie (heading-gebaseerd) ────────────────
+            _, _, pth_start = _read_pose()
+            target_heading = _angle_wrap(pth_start + math.pi)   # +180°
+            TURN_OMEGA  = 2.0   # [rad/s] draaisnelheid
+            TURN_DONE   = 0.08  # [rad] deadband voor "klaar"
+            TURN_TIMEOUT = 6.0  # [s] veiligheids-timeout
+            _t_turn = time.time()
+            print(f"[auto] LOSSEN: 180° draaien (van {math.degrees(pth_start):.1f}° naar {math.degrees(target_heading):.1f}°)")
+            while True:
+                await asyncio.sleep(0.05)
+                _, _, pth_now = _read_pose()
+                err = _angle_wrap(target_heading - pth_now)
+                if abs(err) < TURN_DONE or (time.time() - _t_turn) > TURN_TIMEOUT:
+                    break
+                omega = max(-TURN_OMEGA, min(TURN_OMEGA, 3.0 * err))
+                write_drive_cmd(0.0, 0.0, omega)
+            write_drive_cmd(0.0, 0.0, 0.0)
+            print("[auto] LOSSEN: 180° gedraaid → klep open")
+            await asyncio.sleep(0.2)
+
             _klep_open()
             print("[auto] LOSSEN: klep open, bekers lossen...")
             await asyncio.sleep(15.0)   # TODO: pas duur aan op basis van hardware
@@ -1798,7 +1906,8 @@ async def main():
             pose_loop(),
             obstacle_map_loop(),
             home_loop(),
-            auto_loop()
+            auto_loop(),
+            log_loop()
         )
 
 if __name__ == "__main__":
