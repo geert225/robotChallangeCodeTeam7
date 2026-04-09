@@ -798,7 +798,11 @@ async def vision_loop():
         for c in ycnt:
             a = cv2.contourArea(c)
             if a >= MIN_YELLOW_AREA and a > best_yellow_area:
-                best_yellow = cv2.boundingRect(c)   # (x, y, w, h)
+                x, y, w, h = cv2.boundingRect(c)
+                cy_center = y + h // 2
+                if cy_center < _ignore_top_y:
+                    continue   # gele zone zit in genegeerde topzone
+                best_yellow = (x, y, w, h)
                 best_yellow_area = a
         _yellow_zone = best_yellow
 

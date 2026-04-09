@@ -300,15 +300,15 @@
       <div id="auto-state-dot" class="idle"></div>
       <span id="auto-state-label">Wachten op start</span>
     </div>
-    <div id="auto-cups-wrap">
-      <div id="auto-cups-icons"><!-- gevuld door JS --></div>
-      <span id="auto-cups-label">0 / 3 bekers</span>
-    </div>
     <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
       <label style="font-size:0.75em;color:#8b949e;white-space:nowrap;">Max bekers</label>
       <input type="range" min="1" max="10" value="3" id="sl-max-cups" style="width:80px;accent-color:#3fb950;"
              oninput="sliderVal('sl-max-cups','sv-max-cups'); send('set_max_cups:'+this.value)">
       <span style="font-size:0.85em;font-weight:bold;color:#3fb950;min-width:14px;" id="sv-max-cups">3</span>
+    </div>
+    <div id="auto-cups-wrap">
+      <div id="auto-cups-icons"><!-- gevuld door JS --></div>
+      <span id="auto-cups-label">0 / 3 bekers</span>
     </div>
     <div id="auto-btns">
       <button id="btn-auto-pause" onclick="autoPause()">&#9646;&#9646; Pauze</button>

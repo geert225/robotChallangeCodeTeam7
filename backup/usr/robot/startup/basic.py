@@ -13,6 +13,7 @@ PROCESS_COMMANDS = [
     ("CAMERA", ["python", "../vision/camera.py"]),
     ("GRIPPER", ["python", "../motors/gripper.py"]),
     ("ODOMERY", ["python", "../ctrl/odometry.py"]),
+    ("BRAIN", ["python", "../ctrl/fullBrain.py"]),
 ]
 
 # Shutdown script
