@@ -52,15 +52,29 @@ def _load_calib_yellow():
     except Exception:
         return np.array([18, 80, 80]), np.array([38, 255, 255])
 
+def _load_calib_exclude():
+    try:
+        with open(_CALIB_PATH) as f:
+            d = json.load(f)
+        if "exclude_lower" in d and "exclude_upper" in d:
+            return np.array(d["exclude_lower"]), np.array(d["exclude_upper"])
+        return None, None
+    except Exception:
+        return None, None
+
 def _save_calib():
     try:
+        data = {
+            "hsv_lower":    LOWER_HSV.tolist(),
+            "hsv_upper":    UPPER_HSV.tolist(),
+            "yellow_lower": YELLOW_HSV_LOWER.tolist(),
+            "yellow_upper": YELLOW_HSV_UPPER.tolist(),
+        }
+        if EXCLUDE_HSV_LOWER is not None and EXCLUDE_HSV_UPPER is not None:
+            data["exclude_lower"] = EXCLUDE_HSV_LOWER.tolist()
+            data["exclude_upper"] = EXCLUDE_HSV_UPPER.tolist()
         with open(_CALIB_PATH, "w") as f:
-            json.dump({
-                "hsv_lower":    LOWER_HSV.tolist(),
-                "hsv_upper":    UPPER_HSV.tolist(),
-                "yellow_lower": YELLOW_HSV_LOWER.tolist(),
-                "yellow_upper": YELLOW_HSV_UPPER.tolist(),
-            }, f)
+            json.dump(data, f)
         print("[calib] opgeslagen")
     except Exception as e:
         print(f"[calib] fout: {e}")
@@ -649,6 +663,7 @@ ROT_SPEED = 3.0
 # ============================================================
 LOWER_HSV, UPPER_HSV         = _load_calib_hsv()
 YELLOW_HSV_LOWER, YELLOW_HSV_UPPER = _load_calib_yellow()
+EXCLUDE_HSV_LOWER, EXCLUDE_HSV_UPPER = _load_calib_exclude()   # None = uitgeschakeld
 MIN_BEKER_AREA  = 50
 MAX_BEKER_AREA  = 300_000
 MIN_OBST_AREA   = 250
@@ -762,6 +777,11 @@ async def vision_loop():
         hsv  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+        # Uitsluitkleur: verwijder pixels die overeenkomen met het exclude-bereik
+        if EXCLUDE_HSV_LOWER is not None and EXCLUDE_HSV_UPPER is not None:
+            ex_mask = cv2.inRange(hsv, EXCLUDE_HSV_LOWER, EXCLUDE_HSV_UPPER)
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(ex_mask))
 
         # Bereken de Y-cutoff voor de topzone (pixels vanaf bovenkant)
         _ignore_top_y = int(frame_h * CUP_IGNORE_TOP_PCT / 100)
@@ -976,6 +996,7 @@ async def handle_control_ws(reader, writer, request):
     global robot_mode, drive_state, _blink_counter
     global gripper_jog_speed, gripper_auto_speed, gripper_home_speed
     global LOWER_HSV, UPPER_HSV, YELLOW_HSV_LOWER, YELLOW_HSV_UPPER
+    global EXCLUDE_HSV_LOWER, EXCLUDE_HSV_UPPER
     global home_strategy, _gripper_pending_auto, _gripper_manual_jogged
     global _vision_debug_step, auto_state, _cup_detection_enabled
     global CUP_IGNORE_TOP_PCT, CUP_BOTTOM_TRIGGER_PCT, AUTO_MAX_CUPS
@@ -998,6 +1019,11 @@ async def handle_control_ws(reader, writer, request):
     await _ws_send_text(writer, f"hsv:{lo[0]},{lo[1]},{lo[2]},{hi[0]},{hi[1]},{hi[2]}")
     yl, yh = YELLOW_HSV_LOWER.tolist(), YELLOW_HSV_UPPER.tolist()
     await _ws_send_text(writer, f"yellow_hsv:{yl[0]},{yl[1]},{yl[2]},{yh[0]},{yh[1]},{yh[2]}")
+    if EXCLUDE_HSV_LOWER is not None and EXCLUDE_HSV_UPPER is not None:
+        el, eh = EXCLUDE_HSV_LOWER.tolist(), EXCLUDE_HSV_UPPER.tolist()
+        await _ws_send_text(writer, f"hsv_exclude:{el[0]},{el[1]},{el[2]},{eh[0]},{eh[1]},{eh[2]}")
+    else:
+        await _ws_send_text(writer, "hsv_exclude:off")
     await _ws_send_text(writer, f"vision_step:{_vision_debug_step}")
     await _ws_send_text(writer, f"cup_detection:{'1' if _cup_detection_enabled else '0'}")
     await _ws_send_text(writer, f"ignore_top_pct:{CUP_IGNORE_TOP_PCT}")
@@ -1119,6 +1145,22 @@ async def handle_control_ws(reader, writer, request):
                     YELLOW_HSV_UPPER = np.array(v[3:6])
                     _save_calib()
                     print(f"[brain] Yellow HSV → lower={YELLOW_HSV_LOWER.tolist()} upper={YELLOW_HSV_UPPER.tolist()}")
+                except Exception:
+                    pass
+
+            elif msg.startswith("set_hsv_exclude:"):
+                try:
+                    payload = msg.split(":", 1)[1]
+                    if payload == "off":
+                        EXCLUDE_HSV_LOWER = None
+                        EXCLUDE_HSV_UPPER = None
+                        print("[brain] uitsluitkleur → uitgeschakeld")
+                    else:
+                        v = [int(x) for x in payload.split(",")]
+                        EXCLUDE_HSV_LOWER = np.array(v[0:3])
+                        EXCLUDE_HSV_UPPER = np.array(v[3:6])
+                        print(f"[brain] uitsluitkleur → lower={EXCLUDE_HSV_LOWER.tolist()} upper={EXCLUDE_HSV_UPPER.tolist()}")
+                    _save_calib()
                 except Exception:
                     pass
 

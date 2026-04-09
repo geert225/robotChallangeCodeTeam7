@@ -500,6 +500,36 @@
       </div>
 
       <div class="settings-section">
+        <span class="section-label">Uitsluitkleur — uit bekermasker verwijderen</span>
+        <div class="hidden">
+          <input type="range" id="sl-exl-h" min="0" max="180" value="0">
+          <input type="range" id="sl-exl-s" min="0" max="255" value="0">
+          <input type="range" id="sl-exl-v" min="0" max="255" value="0">
+          <input type="range" id="sl-exh-h" min="0" max="180" value="0">
+          <input type="range" id="sl-exh-s" min="0" max="255" value="0">
+          <input type="range" id="sl-exh-v" min="0" max="255" value="0">
+        </div>
+        <div class="slider-row" style="margin-top:4px;">
+          <label>Marge tint</label>
+          <input type="range" min="0" max="30" value="10" id="sl-ex-margin-h"
+                 oninput="sliderVal('sl-ex-margin-h','sv-ex-margin-h'); recalculateExcludeHSV()">
+          <span class="val" id="sv-ex-margin-h">10</span>
+        </div>
+        <div class="slider-row">
+          <label>Marge S/V</label>
+          <input type="range" min="0" max="100" value="40" id="sl-ex-margin-sv"
+                 oninput="sliderVal('sl-ex-margin-sv','sv-ex-margin-sv'); recalculateExcludeHSV()">
+          <span class="val" id="sv-ex-margin-sv">40</span>
+        </div>
+        <canvas id="exclude-hsv-preview" width="240" height="24" style="margin-top:6px;border:1px solid #30363d;border-radius:4px;"></canvas>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+          <span id="ex-sample-count" style="font-size:0.8em;color:#8b949e;">Geen samples</span>
+          <button class="btn-small" onclick="clearExcludeHSV()" style="margin-left:auto;">Uitschakelen</button>
+        </div>
+        <div id="ex-save-hint" style="font-size:0.75em;color:#3fb950;margin-top:4px;display:none;">&#10003; Opgeslagen</div>
+      </div>
+
+      <div class="settings-section">
         <span class="section-label">Gele zone detectie — gripper vlak</span>
         <div class="color-picker-row">
           <label>Geel min</label>
@@ -569,6 +599,7 @@
           <div style="display:flex;gap:4px;">
             <button class="btn-small" id="sample-target-cup" onclick="setSampleTarget('cup')" style="background:#1f6feb;color:#fff;border-color:#388bfd;">Beker</button>
             <button class="btn-small" id="sample-target-yellow" onclick="setSampleTarget('yellow')">Gele zone</button>
+            <button class="btn-small" id="sample-target-exclude" onclick="setSampleTarget('exclude')">Uitsluiten</button>
             <button class="btn-small" onclick="clearColorSamples()">Wis alles</button>
           </div>
         </div>
@@ -648,7 +679,8 @@ camWs.onmessage  = (e) => {
 // ── Camera color sampler ───────────────────────────────────────
 let colorSamples = [];
 let yellowColorSamples = [];
-let sampleTarget = 'cup';  // 'cup' of 'yellow'
+let excludeColorSamples = [];
+let sampleTarget = 'cup';  // 'cup', 'yellow' of 'exclude'
 
 document.getElementById("cam-canvas").addEventListener("click", (e) => {
   const canvas = document.getElementById("cam-canvas");
@@ -666,6 +698,12 @@ function addColorSample(r, g, b) {
     recalculateYellowHSVFromSamples();
     return;
   }
+  if (sampleTarget === 'exclude') {
+    excludeColorSamples.push({ r, g, b });
+    renderSampleList();
+    recalculateExcludeHSVFromSamples();
+    return;
+  }
   colorSamples.push({ r, g, b });
   renderSampleList();
   recalculateHSV();
@@ -676,6 +714,10 @@ function removeColorSample(i) {
     yellowColorSamples.splice(i, 1);
     renderSampleList();
     recalculateYellowHSVFromSamples();
+  } else if (sampleTarget === 'exclude') {
+    excludeColorSamples.splice(i, 1);
+    renderSampleList();
+    recalculateExcludeHSVFromSamples();
   } else {
     colorSamples.splice(i, 1);
     renderSampleList();
@@ -686,6 +728,9 @@ function removeColorSample(i) {
 function clearColorSamples() {
   if (sampleTarget === 'yellow') {
     yellowColorSamples = [];
+  } else if (sampleTarget === 'exclude') {
+    excludeColorSamples = [];
+    recalculateExcludeHSVFromSamples();
   } else {
     colorSamples = [];
   }
@@ -695,7 +740,10 @@ function clearColorSamples() {
 function renderSampleList() {
   const list = document.getElementById("sample-list");
   list.innerHTML = "";
-  const samples = sampleTarget === 'yellow' ? yellowColorSamples : colorSamples;
+  let samples;
+  if (sampleTarget === 'yellow')  samples = yellowColorSamples;
+  else if (sampleTarget === 'exclude') samples = excludeColorSamples;
+  else samples = colorSamples;
   samples.forEach(({ r, g, b }, i) => {
     const hex = "#" + [r,g,b].map(x => x.toString(16).padStart(2,"0")).join("");
     const swatch = document.createElement("div");
@@ -710,17 +758,22 @@ function renderSampleList() {
 
 function setSampleTarget(target) {
   sampleTarget = target;
-  const hint      = document.getElementById("sample-hint");
-  const btnCup    = document.getElementById("sample-target-cup");
-  const btnYellow = document.getElementById("sample-target-yellow");
+  const hint       = document.getElementById("sample-hint");
+  const btnCup     = document.getElementById("sample-target-cup");
+  const btnYellow  = document.getElementById("sample-target-yellow");
+  const btnExclude = document.getElementById("sample-target-exclude");
+  btnCup.style.cssText     = "";
+  btnYellow.style.cssText  = "";
+  btnExclude.style.cssText = "";
   if (target === 'cup') {
     hint.innerHTML = "&#128681; Samplen: <b>Beker</b>";
-    btnCup.style.cssText    = "background:#1f6feb;color:#fff;border-color:#388bfd;";
-    btnYellow.style.cssText = "";
-  } else {
+    btnCup.style.cssText = "background:#1f6feb;color:#fff;border-color:#388bfd;";
+  } else if (target === 'yellow') {
     hint.innerHTML = "&#128681; Samplen: <b>Gele zone</b>";
-    btnCup.style.cssText    = "";
     btnYellow.style.cssText = "background:#856000;color:#fff;border-color:#d29922;";
+  } else {
+    hint.innerHTML = "&#128681; Samplen: <b>Uitsluiten</b>";
+    btnExclude.style.cssText = "background:#6e2020;color:#fff;border-color:#f85149;";
   }
   renderSampleList();
 }
@@ -741,6 +794,93 @@ function recalculateYellowHSVFromSamples() {
   document.getElementById("cp-yellow-lower").value = hsvToHex(hl, sl, vl);
   document.getElementById("cp-yellow-upper").value = hsvToHex(hh, sh, vh);
   updateYellowHSV();
+}
+
+function recalculateExcludeHSVFromSamples() {
+  const countEl = document.getElementById("ex-sample-count");
+  if (excludeColorSamples.length === 0) {
+    countEl.textContent = "Geen samples";
+    drawExcludeHsvPreview();
+    return;
+  }
+  countEl.textContent = excludeColorSamples.length + " sample(s)";
+  const hsvs = excludeColorSamples.map(({ r, g, b }) => rgbToHsv(r, g, b));
+  const mh  = parseInt(document.getElementById("sl-ex-margin-h").value);
+  const msv = parseInt(document.getElementById("sl-ex-margin-sv").value);
+  const hl = Math.max(0,   Math.min(...hsvs.map(h => h[0])) - mh);
+  const hh = Math.min(180, Math.max(...hsvs.map(h => h[0])) + mh);
+  const sl = Math.max(0,   Math.min(...hsvs.map(h => h[1])) - msv);
+  const sh = Math.min(255, Math.max(...hsvs.map(h => h[1])) + msv);
+  const vl = Math.max(0,   Math.min(...hsvs.map(h => h[2])) - msv);
+  const vh = Math.min(255, Math.max(...hsvs.map(h => h[2])) + msv);
+  document.getElementById("sl-exl-h").value = hl; document.getElementById("sl-exl-s").value = sl; document.getElementById("sl-exl-v").value = vl;
+  document.getElementById("sl-exh-h").value = hh; document.getElementById("sl-exh-s").value = sh; document.getElementById("sl-exh-v").value = vh;
+  updateExcludeHSV();
+}
+
+function recalculateExcludeHSV() {
+  if (excludeColorSamples.length === 0) return;
+  recalculateExcludeHSVFromSamples();
+}
+
+let _excludeHsvTimer = null;
+function updateExcludeHSV() {
+  drawExcludeHsvPreview();
+  clearTimeout(_excludeHsvTimer);
+  _excludeHsvTimer = setTimeout(() => {
+    const hl = document.getElementById("sl-exl-h").value;
+    const sl = document.getElementById("sl-exl-s").value;
+    const vl = document.getElementById("sl-exl-v").value;
+    const hh = document.getElementById("sl-exh-h").value;
+    const sh = document.getElementById("sl-exh-s").value;
+    const vh = document.getElementById("sl-exh-v").value;
+    send(`set_hsv_exclude:${hl},${sl},${vl},${hh},${sh},${vh}`);
+    const hint = document.getElementById("ex-save-hint");
+    hint.style.display = "block";
+    setTimeout(() => hint.style.display = "none", 1500);
+  }, 400);
+}
+
+function clearExcludeHSV() {
+  excludeColorSamples = [];
+  document.getElementById("ex-sample-count").textContent = "Geen samples";
+  drawExcludeHsvPreview(true);
+  send("set_hsv_exclude:off");
+  if (sampleTarget === 'exclude') renderSampleList();
+}
+
+function drawExcludeHsvPreview(empty) {
+  const canvas = document.getElementById("exclude-hsv-preview");
+  const ctx    = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  if (empty || excludeColorSamples.length === 0) {
+    ctx.fillStyle = "#1c1c1c";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#555";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("uitgeschakeld", W/2, H/2 + 4);
+    return;
+  }
+  const hl = parseInt(document.getElementById("sl-exl-h").value);
+  const hh = parseInt(document.getElementById("sl-exh-h").value);
+  const sl = parseInt(document.getElementById("sl-exl-s").value) / 255;
+  const sh = parseInt(document.getElementById("sl-exh-s").value) / 255;
+  const vl = parseInt(document.getElementById("sl-exl-v").value) / 255;
+  const vh = parseInt(document.getElementById("sl-exh-v").value) / 255;
+  const smid = (sl + sh) / 2, vmid = (vl + vh) / 2;
+  for (let x = 0; x < W; x++) {
+    const h = hl + (hh - hl) * (x / W);
+    const [r, g, b] = hsvToRgb(h * 2, smid, vmid);
+    ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+    ctx.fillRect(x, 0, 1, H);
+  }
+  // rode diagonale strepen om "uitsluiten" aan te geven
+  ctx.strokeStyle = "rgba(255,0,0,0.5)";
+  ctx.lineWidth = 2;
+  for (let xi = -H; xi < W; xi += 14) {
+    ctx.beginPath(); ctx.moveTo(xi, 0); ctx.lineTo(xi + H, H); ctx.stroke();
+  }
 }
 
 function toggleCupDetection(enabled) {
@@ -816,6 +956,17 @@ ws.onmessage = (e) => {
     document.getElementById("cp-yellow-lower").value = hsvToHex(v[0], v[1], v[2]);
     document.getElementById("cp-yellow-upper").value = hsvToHex(v[3], v[4], v[5]);
     drawYellowHsvPreview();
+  } else if (d.startsWith("hsv_exclude:")) {
+    const payload = d.slice(12);
+    if (payload === "off") {
+      drawExcludeHsvPreview(true);
+      document.getElementById("ex-sample-count").textContent = "Geen samples";
+    } else {
+      const v = payload.split(",").map(Number);
+      document.getElementById("sl-exl-h").value = v[0]; document.getElementById("sl-exl-s").value = v[1]; document.getElementById("sl-exl-v").value = v[2];
+      document.getElementById("sl-exh-h").value = v[3]; document.getElementById("sl-exh-s").value = v[4]; document.getElementById("sl-exh-v").value = v[5];
+      drawExcludeHsvPreview();
+    }
   } else if (d.startsWith("auto_state:")) {
     applyAutoState(d.slice(11));
   } else if (d.startsWith("auto_cups:")) {
@@ -1289,6 +1440,7 @@ function lastPose() {
 
 drawMap(0, 0, 0);
 drawHsvPreview();
+drawExcludeHsvPreview(true);
 
 // ── Toetsenbord ───────────────────────────────────────────────
 let keys = new Set();
