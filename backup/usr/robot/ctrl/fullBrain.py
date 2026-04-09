@@ -1933,7 +1933,17 @@ async def auto_loop():
             error = (pole_cx - _auto_frame_w // 2) / max(_auto_frame_w // 2, 1)
             omega = 0.0 if abs(error) < HOME_POLE_ERROR_DEADBAND else \
                     max(-HOME_POLE_MAX_OMEGA, min(HOME_POLE_MAX_OMEGA, -HOME_POLE_K_OMEGA * error))
-            write_drive_cmd(HOME_POLE_DRIVE_SPEED, 0.0, omega)
+            vx = HOME_POLE_DRIVE_SPEED
+
+            # Obstakel veiligheidscheck: kap vx terug bij obstakel voor
+            vx, _, omega = _apply_avoidance(vx, 0.0, omega)
+
+            # Zijdelingse dodge (geen camera-hint voor paal, sensoren bepalen richting)
+            vy_dodge = _ultra_dodge_vy(cup_cx=None, frame_w=_auto_frame_w)
+            if vy_dodge != 0.0:
+                vx = -ULTRA_DODGE_VX_BACK   # schuin achteruit tijdens dodge
+
+            write_drive_cmd(vx, vy_dodge, omega)
 
             # Motor stuck tijdens rijden → terug naar zoekfase
             if _motor_stuck_update(HOME_POLE_DRIVE_SPEED, 0.0):
