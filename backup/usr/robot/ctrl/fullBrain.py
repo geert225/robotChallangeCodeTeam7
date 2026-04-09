@@ -309,6 +309,25 @@ def _read_pose():
         return 0.0, 0.0, 0.0
 
 # ============================================================
+# SHARED MEMORY — GYRO RAW  (geschreven door i2c.py, Madgwick-filter)
+# Formaat: "<dddd"  →  (timestamp, roll, pitch, yaw)   yaw in graden
+# ============================================================
+GYRO_SHM_PATH = "/dev/shm/gyro"
+GYRO_FMT      = "<dddd"
+GYRO_SIZE     = struct.calcsize(GYRO_FMT)
+
+gyro_shm, gyro_fh = _create_or_open_shm(GYRO_SHM_PATH, GYRO_SIZE)
+
+def _read_gyro_yaw() -> float:
+    """Leest ruwe Madgwick-yaw uit /dev/shm/gyro, geeft terug in radialen."""
+    try:
+        gyro_shm.seek(0)
+        _, _, _, yaw_deg = struct.unpack(GYRO_FMT, gyro_shm.read(GYRO_SIZE))
+        return math.radians(yaw_deg)
+    except Exception:
+        return _read_pose()[2]   # fallback naar odometrie
+
+# ============================================================
 # SHARED MEMORY — ULTRASOON
 # Format: <ddHH  →  update_rate (double) + timestamp (double) + d1 (uint16) + d2 (uint16)
 # Sensororiëntatie (aanpassen op fysieke montage):
@@ -1929,17 +1948,17 @@ async def auto_loop():
         elif auto_state == AUTO_LOSSEN:
             write_drive_cmd(0.0, 0.0, 0.0)
 
-            # ── 180° draaien via odometrie (heading-gebaseerd) ────────────────
-            _, _, pth_start = _read_pose()
+            # ── 180° draaien via ruwe gyro (heading-gebaseerd) ───────────────
+            pth_start = _read_gyro_yaw()
             target_heading = _angle_wrap(pth_start + math.pi)   # +180°
             TURN_OMEGA  = 2.0   # [rad/s] draaisnelheid
             TURN_DONE   = 0.08  # [rad] deadband voor "klaar"
-            TURN_TIMEOUT = 6.0  # [s] veiligheids-timeout
+            TURN_TIMEOUT = 20.0  # [s] veiligheids-timeout
             _t_turn = time.time()
-            print(f"[auto] LOSSEN: 180° draaien (van {math.degrees(pth_start):.1f}° naar {math.degrees(target_heading):.1f}°)")
+            print(f"[auto] LOSSEN: 180° draaien via gyro (van {math.degrees(pth_start):.1f}° naar {math.degrees(target_heading):.1f}°)")
             while True:
                 await asyncio.sleep(0.05)
-                _, _, pth_now = _read_pose()
+                pth_now = _read_gyro_yaw()
                 err = _angle_wrap(target_heading - pth_now)
                 if abs(err) < TURN_DONE or (time.time() - _t_turn) > TURN_TIMEOUT:
                     break
